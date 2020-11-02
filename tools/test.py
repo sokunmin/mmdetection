@@ -4,6 +4,7 @@ import warnings
 
 import mmcv
 import torch
+import importlib
 from mmcv import Config, DictAction
 from mmcv.cnn import fuse_conv_bn
 from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
@@ -11,6 +12,7 @@ from mmcv.runner import (get_dist_info, init_dist, load_checkpoint,
                          wrap_fp16_model)
 
 from mmdet.apis import multi_gpu_test, single_gpu_test
+from mmdet.core.evaluation.class_names import get_ckpt_converter
 from mmdet.datasets import (build_dataloader, build_dataset,
                             replace_ImageToTensor)
 from mmdet.models import build_detector
@@ -79,6 +81,11 @@ def parse_args():
         choices=['none', 'pytorch', 'slurm', 'mpi'],
         default='none',
         help='job launcher')
+    parser.add_argument(
+        '--ckpt-module',
+        choices=['mmcv', 'fcos', 'embedmask', 'simplepose', 'ttfnet'],
+        default='mmcv',
+        help='name of converter')
     parser.add_argument('--local_rank', type=int, default=0)
     args = parser.parse_args()
     if 'LOCAL_RANK' not in os.environ:
@@ -96,6 +103,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    ckpt_module = get_ckpt_converter(args.ckpt_module)
 
     assert args.out or args.eval or args.format_only or args.show \
         or args.show_dir, \
@@ -162,6 +170,7 @@ def main():
     fp16_cfg = cfg.get('fp16', None)
     if fp16_cfg is not None:
         wrap_fp16_model(model)
+    load_checkpoint = getattr(importlib.import_module(ckpt_module), 'load_checkpoint')
     checkpoint = load_checkpoint(model, args.checkpoint, map_location='cpu')
     if args.fuse_conv_bn:
         model = fuse_conv_bn(model)

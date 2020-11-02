@@ -114,3 +114,17 @@ def get_classes(dataset):
     else:
         raise TypeError(f'dataset must a str, but got {type(dataset)}')
     return labels
+
+
+ckpt_aliases = {
+    'mmcv': 'mmcv.runner',
+    'ttfnet': 'tools.convert_checkpoint.ttfnet',
+}
+
+
+def get_ckpt_converter(ckpt):
+    if ckpt in ckpt_aliases:
+        ckpt_module = ckpt_aliases[ckpt]
+    else:
+        raise AttributeError("No key named " + ckpt + " found")
+    return ckpt_module

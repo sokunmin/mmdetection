@@ -208,6 +208,30 @@ def ciou_loss(pred, target, eps=1e-7):
     return loss
 
 
+@weighted_loss
+def ct_giou_loss(bboxes1, bboxes2, eps=1e-7):
+    """GIoU loss.
+    Computing the GIoU loss between a set of predicted bboxes and target bboxes.
+    """
+    lt = torch.max(bboxes1[:, :2], bboxes2[:, :2])  # [rows, 2]
+    rb = torch.min(bboxes1[:, 2:], bboxes2[:, 2:])  # [rows, 2]
+    wh = (rb - lt + 1).clamp(min=0)  # [rows, 2]
+    enclose_x1y1 = torch.min(bboxes1[:, :2], bboxes2[:, :2])
+    enclose_x2y2 = torch.max(bboxes1[:, 2:], bboxes2[:, 2:])
+    enclose_wh = (enclose_x2y2 - enclose_x1y1 + 1).clamp(min=0)
+
+    overlap = wh[:, 0] * wh[:, 1]
+    area1 = (bboxes1[:, 2] - bboxes1[:, 0] + 1) * (bboxes1[:, 3] - bboxes1[:, 1] + 1)
+    area2 = (bboxes2[:, 2] - bboxes2[:, 0] + 1) * (bboxes2[:, 3] - bboxes2[:, 1] + 1)
+    ious = overlap / (area1 + area2 - overlap) + eps
+
+    enclose_area = enclose_wh[:, 0] * enclose_wh[:, 1]  # i.e. C in paper
+    union = area1 + area2 - overlap
+    gious = ious - (enclose_area - union) / enclose_area
+    loss = 1 - gious  # (#pos,)
+    return loss
+
+
 @LOSSES.register_module()
 class IoULoss(nn.Module):
     """IoULoss.
@@ -409,6 +433,43 @@ class CIoULoss(nn.Module):
         loss = self.loss_weight * ciou_loss(
             pred,
             target,
+            weight,
+            eps=self.eps,
+            reduction=reduction,
+            avg_factor=avg_factor,
+            **kwargs)
+        return loss
+
+
+@LOSSES.register_module()
+class CenterGIoULoss(nn.Module):
+
+    def __init__(self, eps=1e-6, reduction='mean', loss_weight=1.0):
+        super(CenterGIoULoss, self).__init__()
+        self.eps = eps
+        self.reduction = reduction
+        self.loss_weight = loss_weight
+
+    def forward(self,
+                pred,
+                target,
+                weight=None,
+                avg_factor=None,
+                reduction_override=None,
+                **kwargs):
+        if weight is not None and not torch.any(weight > 0):
+            return (pred * weight).sum()  # 0
+        assert reduction_override in (None, 'none', 'mean', 'sum')
+        reduction = (
+            reduction_override if reduction_override else self.reduction)
+
+        pos_mask = weight > 0  # (B, H, W)
+        weight = weight[pos_mask].float()  # (#pos,)
+        bboxes1 = pred[pos_mask].view(-1, 4)  # (B, H, W, 4) ∩ (#pos,) -> (#pos, 4)
+        bboxes2 = target[pos_mask].view(-1, 4)  # (B, H, W, 4) ∩ (#pos,) -> (#pos, 4)
+        loss = self.loss_weight * ct_giou_loss(
+            bboxes1,
+            bboxes2,
             weight,
             eps=self.eps,
             reduction=reduction,
