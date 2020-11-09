@@ -11,35 +11,39 @@ import numpy as np
 from mmdet.core import multi_apply, calc_region, simple_nms
 from .base_dense_head import BaseDenseHead
 from ..builder import HEADS, build_loss
+from ..utils.center_ops import transpose_and_gather_feat, topk, topk_channel
 from ...core.bbox.iou_calculators.iou2d_calculator import bbox_areas
 
 
 @HEADS.register_module
-class TTFHead(BaseDenseHead):
+class CenterHead(BaseDenseHead):
 
     def __init__(self,
-                 inplanes=(64, 128, 256, 512),
-                 planes=(256, 128, 64),
+                 in_channels=64,
+                 feat_channels=256,
                  use_dla=False,
-                 base_down_ratio=32,
-                 head_conv_channel=256,
-                 wh_conv_channel=64,
-                 num_hm_convs=2,
-                 num_wh_convs=2,
-                 num_classes=80,
-                 shortcut_kernel=3,
-                 shortcut_cfg=(1, 2, 3),
-                 wh_offset_base=16.,
-                 wh_area_process='log',
-                 wh_agnostic=True,
-                 wh_gaussian=True,
+                 down_ratio=4,
+                 num_classes=1,
+                 stacked_convs=1,
+                 ct_head_cfg=dict(
+                     wh_out_channels=2,
+                     reg_out_channels=2,
+                     offset_base=16.,
+                     area_process='log',
+                     with_agnostic=True,
+                     with_gaussian=True
+                 ),
+                 kp_head_cfg=dict(
+                     ct_out_channels=17,
+                     reg_out_channels=34,
+                     offset_out_channels=2
+                 ),
                  alpha=0.54,
                  beta=0.54,
                  max_objs=128,
                  conv_cfg=None,
                  conv_bias='auto',
                  norm_cfg=None,
-                 upsample_cfg=dict(type='bilinear'),
                  loss_cls=dict(
                      type='CenterFocalLoss',
                      gamma=2.0,
@@ -47,23 +51,25 @@ class TTFHead(BaseDenseHead):
                  loss_bbox=dict(type='CenterGIoULoss', loss_weight=5.0),
                  train_cfg=None,
                  test_cfg=None):
-        super(TTFHead, self).__init__()
-        assert len(planes) in [2, 3, 4]
-        shortcut_num = min(len(inplanes) - 1, len(planes))
-        assert shortcut_num == len(shortcut_cfg)
-        assert wh_area_process in [None, 'norm', 'log', 'sqrt']
-
-        self.planes = planes
+        super(CenterHead, self).__init__()
+        self.ct_head_cfg = ct_head_cfg
+        self.kp_head_cfg = kp_head_cfg
+        assert ct_head_cfg.area_process in [None, 'norm', 'log', 'sqrt']
+        self.in_channels = in_channels
+        self.feat_channels = feat_channels
         self.use_dla = use_dla
-        self.head_conv_channel = head_conv_channel
         self.num_classes = num_classes
-        self.wh_offset_base = wh_offset_base
-        self.wh_area_process = wh_area_process
-        self.wh_agnostic = wh_agnostic
-        self.wh_gaussian = wh_gaussian
+        self.num_keypoints = kp_head_cfg.ct_out_channels
         self.alpha = alpha
         self.beta = beta
         self.max_objs = max_objs
+        self.stacked_convs = stacked_convs
+
+        self.limbs = [[0, 1], [0, 2], [1, 3], [2, 4],
+                      [3, 5], [4, 6], [5, 6],
+                      [5, 7], [7, 9], [6, 8], [8, 10],
+                      [5, 11], [6, 12], [11, 12],
+                      [11, 13], [13, 15], [12, 14], [14, 16]]
 
         assert conv_bias == 'auto' or isinstance(conv_bias, bool)
         self.conv_bias = conv_bias
@@ -74,135 +80,53 @@ class TTFHead(BaseDenseHead):
         self.conv_cfg = conv_cfg
         self.norm_cfg = norm_cfg
         self.with_norm = norm_cfg is not None
-        self.upsample_cfg = upsample_cfg.copy()
-        self.upsample = self.upsample_cfg.get('type')
-        assert self.upsample in [
-            'nearest', 'bilinear', 'deconv', 'pixel_shuffle', 'carafe', None
-        ]
-        self.upsample_method = self.upsample_cfg.get('type')
-        self.scale_factor = self.upsample_cfg.pop('scale_factor', None)
         self.fp16_enabled = False
-        self.down_ratio = base_down_ratio // 2 ** len(planes)
-        self.wh_planes = 4 if wh_agnostic else 4 * self.num_classes
+        self.down_ratio = down_ratio
         self.base_loc = None
-        if self.upsample in ['deconv', 'pixel_shuffle']:
-            assert hasattr(
-                self.upsample_cfg,
-                'upsample_kernel') and self.upsample_cfg.upsample_kernel > 0
-            self.upsample_kernel = self.upsample_cfg.pop('upsample_kernel')
 
-        # repeat upsampling n times. 32x to 4x by default.
-        self.deconv_layers = nn.ModuleList([
-            self.build_upsample(inplanes[-1], planes[0], norm_cfg=norm_cfg),
-            self.build_upsample(planes[0], planes[1], norm_cfg=norm_cfg)
-        ])
-        for i in range(2, len(planes)):
-            self.deconv_layers.append(
-                self.build_upsample(planes[i - 1], planes[i], norm_cfg=norm_cfg))
+        # > ct heads
+        self.hm = self.build_head(self.num_classes)
+        self.wh = self.build_head(self.ct_head_cfg.wh_out_channels)
+        self.reg = self.build_head(self.ct_head_cfg.reg_out_channels)
 
-        padding = (shortcut_kernel - 1) // 2
-        self.shortcut_layers = self.build_shortcut(
-            inplanes[:-1][::-1][:shortcut_num],
-            planes[:shortcut_num],
-            shortcut_cfg,
-            kernel_size=shortcut_kernel, padding=padding)
+        # > #TODO: split up joint heads
+        self.hm_hp = self.build_head(self.kp_head_cfg.ct_out_channels)
+        self.hps = self.build_head(self.kp_head_cfg.reg_out_channels)
+        self.hp_offset = self.build_head(self.kp_head_cfg.offset_out_channels)
 
-        # heads
-        self.hm = self.build_head(self.num_classes, num_hm_convs)
-        self.wh = self.build_head(self.wh_planes, num_wh_convs, wh_conv_channel)
+    def build_head(self, out_channel):
+        head_convs = [ConvModule(
+            self.in_channels, self.feat_channels, 3,
+            padding=1, bias=True, act_cfg=dict(type='ReLU', inplace=True))]
+        for i in range(1, self.stacked_convs):
+            head_convs.append(ConvModule(
+                self.feat_channels, self.feat_channels, 3,
+                padding=1, bias=True, act_cfg=dict(type='ReLU', inplace=True)))
 
-    def build_shortcut(self,
-                       inplanes,
-                       planes,
-                       shortcut_cfg,
-                       kernel_size=3,
-                       padding=1):
-        assert len(inplanes) == len(planes) == len(shortcut_cfg)
-
-        shortcut_layers = nn.ModuleList()
-        for (inp, outp, layer_num) in zip(inplanes, planes, shortcut_cfg):
-            assert layer_num > 0
-            layer = ShortcutConv2d(inp, outp,
-                                   [kernel_size] * layer_num,
-                                   [padding] * layer_num)
-            shortcut_layers.append(layer)
-        return shortcut_layers
-
-    def build_upsample(self, inplanes, planes, norm_cfg=None):
-        mdcn = ModulatedDeformConv2dPack(inplanes, planes, 3, stride=1,
-                                         padding=1, dilation=1, deformable_groups=1)
-
-        upsample_cfg_ = self.upsample_cfg.copy()
-        if self.upsample == 'deconv':
-            upsample_cfg_.update(
-                in_channels=planes,
-                out_channels=planes,
-                kernel_size=self.upsample_kernel,
-                stride=2,
-                padding=(self.upsample_kernel - 1) // 2,
-                output_padding=(self.upsample_kernel - 1) // 2)
-        elif self.upsample == 'pixel_shuffle':
-            upsample_cfg_.update(
-                in_channels=planes,
-                out_channels=planes,
-                scale_factor=2,
-                upsample_kernel=self.upsample_kernel)
-        elif self.upsample == 'carafe':
-            upsample_cfg_.update(channels=planes, scale_factor=2)
-        else:
-            # suppress warnings
-            align_corners = (None
-                             if self.upsample == 'nearest' else False)
-            upsample_cfg_.update(
-                scale_factor=2,
-                mode=self.upsample,
-                align_corners=align_corners)
-        upsample_module = build_upsample_layer(upsample_cfg_)
-
-        layers = []
-        layers.append(mdcn)
-        if norm_cfg is not None:
-            layers.append(build_norm_layer(norm_cfg, planes)[1])
-        layers.append(nn.ReLU(inplace=True))
-        layers.append(upsample_module)
-
-        return nn.Sequential(*layers)
-
-    def build_head(self, out_channel, num_convs=1, head_conv_plane=None):
-        head_convs = []
-        head_conv_plane = self.head_conv_channel if not head_conv_plane else head_conv_plane
-        for i in range(num_convs):  # `planes`: (256, 128, 64)
-            inp = self.planes[-1] if i == 0 else head_conv_plane
-            head_convs.append(ConvModule(inp, head_conv_plane, 3, padding=1))
-
-        inp = self.planes[-1] if num_convs <= 0 else head_conv_plane
-        head_convs.append(nn.Conv2d(inp, out_channel, 1))
+        head_convs.append(nn.Conv2d(self.feat_channels, out_channel, 1))
         return nn.Sequential(*head_convs)
 
     def init_weights(self):
-        for _, m in self.shortcut_layers.named_modules():
-            if isinstance(m, nn.Conv2d):
-                kaiming_init(m)
-
-        for _, m in self.deconv_layers.named_modules():
-            if isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-
+        # TOCHECK: cmp w/ centerpose/ttfnet
         for _, m in self.hm.named_modules():
             if isinstance(m, nn.Conv2d):
-                normal_init(m, std=0.01)
-
-        bias_cls = bias_init_with_prob(0.01)
+                normal_init(m, std=0.001)
+        # > centernet
+        bias_cls = bias_init_with_prob(0.1)
+        # > ttfnet
+        # bias_cls = bias_init_with_prob(0.01)
         normal_init(self.hm[-1], std=0.01, bias=bias_cls)
+        normal_init(self.hm_hp[-1], std=0.01, bias=bias_cls)
 
-        for _, m in self.wh.named_modules():
+        self._init_head_weights(self.wh)
+        self._init_head_weights(self.hps)
+        self._init_head_weights(self.reg)
+        self._init_head_weights(self.hp_offset)
+
+    def _init_head_weights(self, layer):
+        for _, m in layer.named_modules():
             if isinstance(m, nn.Conv2d):
                 normal_init(m, std=0.001)
-
-        for m in self.modules():
-            if isinstance(m, CARAFEPack):
-                m.init_weights()
 
     def forward(self, feats):
         """
@@ -213,77 +137,174 @@ class TTFHead(BaseDenseHead):
             wh: tensor, (batch, 4, h, w) or (batch, 80 * 4, h, w).
         """
         x = feats[-1]  # (64, H, W)
-        if not self.use_dla:
-            for i, upsample_layer in enumerate(self.deconv_layers):
-                x = upsample_layer(x)  # `scale_factor`: 2
-                if i < len(self.shortcut_layers):
-                    shortcut = self.shortcut_layers[i](feats[-i - 2])
-                    x = x + shortcut
 
-        hm = self.hm(x)  # > (64, H, W) -> (128, H, W) -> (#cls, H, W)
-        # > TOCHECK `wh_offset_base`: https://github.com/ZJULearning/ttfnet/issues/17
-        wh = F.relu(self.wh(x)) * self.wh_offset_base  # > (64, H, W) -> (64, H, W) -> (4, H, W)
+        hm_ct = self.hm(x)  # > (64, H, W) -> (128, H, W) -> (#cls, H, W)
+        ct_wh = self.wh(x)
+        ct_offset = self.reg(x)
+        ct_kp = self.hps(x)
 
-        return hm, wh
+        kp_ct = self.hm_hp(x)
+        kp_offset = self.hp_offset(x)
+        # `hm`: 1, `wh`: 2, `hps`:34, `reg`:2, `hm_hp`: 17, `hp_offset`: 2
+        return hm_ct, ct_offset, ct_wh, ct_kp, kp_ct, kp_offset
 
     def get_bboxes(self,
-                   pred_heatmap,
-                   pred_wh,
+                   pred_ct,
+                   pred_ct_offset,
+                   pred_ct_wh,
+                   pred_ct_kp,
+                   pred_kp_ct,
+                   pred_kp_ct_offset,
                    img_metas,
                    rescale=False):
-        batch, cat, height, width = pred_heatmap.size()
-        pred_heatmap = pred_heatmap.detach().sigmoid_()  # > (#cls, 128, 128)
-        wh = pred_wh.detach()
+        # `ct`: 1, `ct_offset`:2, `ct_wh`: 2, `ct_kp`:34, `kp_ct`: 17, `kp_offset`: 2
+        batch, cls, height, width = pred_ct.size()
+        ct = pred_ct.detach().sigmoid_()  # > (#cls, H, W)
+        ct_offset = pred_ct_offset.detach()  # > (B, 2, H, W)
+        ct2wh_reg = pred_ct_wh.detach()  # > (B, 2, H, W)
+        ct2kp_loc = pred_ct_kp.detach()  # > (B, #kp x 2, H, W)
+        kp_ct = pred_kp_ct.detach().sigmoid_()  # > (B, #kp, H, W)
+        kp_ct_offset = pred_kp_ct_offset.detach()  # > (B, 2, H, W)
+        num_topk = self.test_cfg.max_per_img
+        num_joints = ct2kp_loc.shape[1] // 2
 
-        # perform nms on heatmaps
-        heat = simple_nms(pred_heatmap)  # used maxpool to filter the max score
+        # > perform nms & topk over center points
+        ct = simple_nms(ct)  # used maxpool to filter the max score
+        ct_scores, ct_inds, ct_clses, ct_ys, ct_xs = topk(ct, topk=num_topk)
 
-        topk = self.test_cfg.max_per_img
-        # (batch, topk)
-        scores, inds, clses, ys, xs = self._topk(heat, topk=topk)
-        xs = xs.view(batch, topk, 1) * self.down_ratio  # `down_ratio`: 4
-        ys = ys.view(batch, topk, 1) * self.down_ratio  # (B, topk, 1)
-        # (B, 4, H, W) -> (B, H, W, 4)
-        wh = wh.permute(0, 2, 3, 1).contiguous()
-        wh = wh.view(wh.size(0), -1, wh.size(3))  # (B, H, W, 4) -> (B, HxW, 4)
-        # (B, topk) -> (B, topk, 1) -> (B, topk, 4)
-        inds = inds.unsqueeze(2).expand(inds.size(0), inds.size(1), wh.size(2))
-        wh = wh.gather(1, inds)
+        # [BBox + Scores]
+        # > refine center points by offsets
+        # > [1] TTFNet's way
+        # ct_xs = ct_xs.view(batch, num_topk, 1) * self.down_ratio  # TOCHECK: multiply `down_ratio`: 4 first ?
+        # ct_ys = ct_ys.view(batch, num_topk, 1) * self.down_ratio  # (B, K, 1)
+        # > [2] CenterNet's way
+        ct_offset = transpose_and_gather_feat(ct_offset, ct_inds)
+        ct_offset = ct_offset.view(batch, num_topk, 2)  # (B, K, 2)
+        ct_xs = ct_xs.view(batch, num_topk, 1) + ct_offset[:, :, 0:1]  # (B, K, 1)
+        ct_ys = ct_ys.view(batch, num_topk, 1) + ct_offset[:, :, 1:2]  # (B, K, 1)
 
-        if not self.wh_agnostic:
-            wh = wh.view(-1, topk, self.num_classes, 4)
-            wh = torch.gather(wh, 2, clses[..., None, None].expand(
-                clses.size(0), clses.size(1), 1, 4).long())
+        # > `width/height`: (B, 2, H, W) ∩ (B, K) -> (B, HxW, 2) ∩ (B, K, 2) -> (B, K, 2)
+        ct2wh_reg = transpose_and_gather_feat(ct2wh_reg, ct_inds)
+        ct2wh_reg = ct2wh_reg.view(batch, num_topk, self.ct_head_cfg.wh_out_channels)  # (B, K, 2)
 
-        wh = wh.view(batch, topk, 4)  # (B, topk, 4)
-        clses = clses.view(batch, topk, 1).float()  # (B, topk, 1)
-        scores = scores.view(batch, topk, 1)  # (B, topk, 1)
-        # (B, topk, 4)
-        bboxes = torch.cat([xs - wh[..., [0]], ys - wh[..., [1]],
-                            xs + wh[..., [2]], ys + wh[..., [3]]], dim=2)
+        # > `classes & scores`
+        bbox_clses = ct_clses.view(batch, num_topk, 1).float()  # (B, K, 1)
+        bbox_scores = ct_scores.view(batch, num_topk, 1)  # (B, K, 1)
 
-        result_list = []
-        score_thr = self.test_cfg.score_thr
+        # > `bboxe`s: (B, topk, 4)
+        bboxes = torch.cat([ct_xs - ct2wh_reg[..., 0:1] / 2,
+                            ct_ys - ct2wh_reg[..., 1:2] / 2,
+                            ct_xs + ct2wh_reg[..., 0:1] / 2,
+                            ct_ys + ct2wh_reg[..., 1:2] / 2], dim=2)
+
+        # > center to joint offsets (out: 34)
+        # `ct2kp_loc` ∩ `ct_inds`: (B, 34, H, W) ∩ (B, K) -> (B, HxW, 34) ∩ (B, K, 34) -> (B, K, 34)
+        ct2kp_loc = transpose_and_gather_feat(ct2kp_loc, ct_inds)
+        ct2kp_loc = ct2kp_loc.view(batch, num_topk, num_joints * 2)
+        # (B, K) -> (B, K, 1) -> (B, K, #kp)
+        ct2kp_loc[..., ::2] += ct_xs.view(batch, num_topk, 1).expand(batch, num_topk, num_joints)
+        ct2kp_loc[..., 1::2] += ct_ys.view(batch, num_topk, 1).expand(batch, num_topk, num_joints)
+        ct2kp_loc = ct2kp_loc.view(batch, num_topk, num_joints, 2).permute(0, 2, 1, 3).contiguous()
+
+        # > NOTE: `ct_det_kps`: regressed joint locations, (B, #kp, K, K, 2)
+        ct_det_kps = ct2kp_loc.unsqueeze(3).expand(batch, num_joints, num_topk, num_topk, 2)
+
+        # [Pose]
+        # > centers as joints (out:17)
+        kp_ct = simple_nms(kp_ct)  # (B, #kp, H, W)
+        # `kp_ct`: (B, #kp, H, W) -> (B, #kp, HxW) -> `kp_ct_score/kp_ct_inds`: (B, 17, K)
+        kp_ct_scores, kp_ct_inds, kp_ct_ys, kp_ct_xs = topk_channel(kp_ct, topk=num_topk)
+
+        # > `kp_ct_offset`: refine joint by offsets
+        # `kp_ct_offset`: (B, 2, H, W) ∩ (B, 17xK) -> (B, HxW, 2) ∩ (B, 17xK, 2) -> (B, 17xK, 2)
+        kp_ct_offset = transpose_and_gather_feat(kp_ct_offset, kp_ct_inds.view(batch, -1))
+        kp_ct_offset = kp_ct_offset.view(batch, num_joints, num_topk, 2)
+        kp_ct_xs = kp_ct_xs + kp_ct_offset[..., 0]
+        kp_ct_ys = kp_ct_ys + kp_ct_offset[..., 1]
+
+        # > assign negative values to lower-score entries
+        mask = (kp_ct_scores > self.test_cfg.kp_score_thr).float()  # (B, 17, K)
+        kp_ct_scores = (1 - mask) * -1 + mask * kp_ct_scores
+        kp_ct_xs = (1 - mask) * (-10000) + mask * kp_ct_xs
+        kp_ct_ys = (1 - mask) * (-10000) + mask * kp_ct_ys
+
+        # > NOTE:`kp_det_kps`: detected keypoints, (B, #kp, K, K, 2)
+        kp_det_kps = torch.stack([kp_ct_xs, kp_ct_ys], dim=-1).unsqueeze(2)
+        kp_det_kps = kp_det_kps.expand(batch, num_joints, num_topk, num_topk, 2)
+
+        # NOTE: assign each regressed location to its closest detectio keypoint `argmin(ct_kps_loc - kp_kps_loc)^2`
+        # (B, #kp, K, K, 2) - (B, #kp, K, K, 2)
+        dist = (((ct_det_kps - kp_det_kps) ** 2).sum(dim=4) ** 0.5)
+        min_dist, min_dist_ind = dist.min(dim=3)
+
+        # `kp_ct_score`: (B, #kp, K) -> (B, #kp, K, 1)
+        kp_ct_scores = kp_ct_scores.gather(2, min_dist_ind).unsqueeze(-1)
+        min_dist = min_dist.unsqueeze(-1)  # (B, #kp, K, 1)
+        # `min_ind`: (B, #kp, K, 1) -> (B, #kp, K, 1, 1) -> (B, #kp, K, 1, 2)
+        min_dist_ind = min_dist_ind.view(batch, num_joints, num_topk, 1, 1)
+        min_dist_ind = min_dist_ind.expand(batch, num_joints, num_topk, 1, 2)
+
+        kp_det_kps = kp_det_kps.gather(3, min_dist_ind)  # (B, #kp, K, K, 2)
+        kp_det_kps = kp_det_kps.view(batch, num_joints, num_topk, 2)  # (B, #kp, K, 2)
+
+        # `bboxes`: (B, K, 4) -> `l/t/r/b`: (B, K) -> (B, 1, K, 1) -> (B, #kp, K, 1)
+        l = bboxes[:, :, 0].view(batch, 1, num_topk, 1).expand(batch, num_joints, num_topk, 1)
+        t = bboxes[:, :, 1].view(batch, 1, num_topk, 1).expand(batch, num_joints, num_topk, 1)
+        r = bboxes[:, :, 2].view(batch, 1, num_topk, 1).expand(batch, num_joints, num_topk, 1)
+        b = bboxes[:, :, 3].view(batch, 1, num_topk, 1).expand(batch, num_joints, num_topk, 1)
+
+        # `kp_det_kps`: (B, #kp, K, 2), `kp_ct_score`: (B, #kp, K, 1), `min_dist`: (B, #kp, K, 1)
+        mask = (kp_det_kps[..., 0:1] < l) + (kp_det_kps[..., 0:1] > r) + \
+               (kp_det_kps[..., 1:2] < t) + (kp_det_kps[..., 1:2] > b) + \
+               (kp_ct_scores < self.test_cfg.kp_score_thr) + (min_dist > (torch.max(b - t, r - l) * 0.3))
+        # negative `mask`: (B, #kp, K, 1) -> (B, #kp, K, 2)
+        mask = (mask > 0).float().expand(batch, num_joints, num_topk, 2)
+
+        # `keypoints`: (B, #kp, K, 2) -> (B, K, #kp x 2)
+        kps = (1 - mask) * kp_det_kps + mask * ct2kp_loc
+        kps = kps.permute(0, 2, 1, 3).contiguous().view(batch, num_topk, num_joints * 2)
+        kp_scores = torch.transpose(kp_ct_scores.squeeze(dim=3), 1, 2)  # (B, K, #kp)
+
+        # `bboxes`: (B, K, 4), `bbox_scores`: (B, K, 1)
+        # `kps`: (B, K, 34), `kp_scores`: (B, K, 17)
+        bbox_result_list = []
+        kp_result_list = []
         for batch_i in range(bboxes.shape[0]):
-            scores_per_img = scores[batch_i]  # (B, topk, 1) -> (topk, 1)
-            scores_keep = (scores_per_img > score_thr).squeeze(-1)  # -> (topk,): boolean
-
-            scores_per_img = scores_per_img[scores_keep]  # (topk, 1)
-            bboxes_per_img = bboxes[batch_i][scores_keep]  # (B, topk, 4) -> (topk, 4)
-            labels_per_img = clses[batch_i][scores_keep]  # (B, topk, 1) -> (topk, 1)
             img_shape = img_metas[batch_i]['pad_shape']  # (512, 512, 3)
+            bboxes_per_img = bboxes[batch_i]
+            bbox_scores_per_img = bbox_scores[batch_i]  # (B, K, 1) -> (K, 1)
+            labels_per_img = bbox_clses[batch_i]  # (B, K, 1) -> (K, 1)
+            kps_per_img = kps[batch_i].view(kps.size(1), kps.size(2) // 2, 2)  # (B, K, #kp x 2) -> (K, #kp, 2)
+            kp_scores_per_img = kp_scores[batch_i]  # (B, K, #kp) -> (K, #kp)
+
+            # bbox_scores_keep = (bbox_scores_per_img > self.test_cfg.score_thr).squeeze(-1)  # -> (K,)
+            # kp_scores_keep = (kp_scores_per_img > self.test_cfg.kp_score_thr).squeeze(-1)  # (K, #kp)
+            # labels_per_img = bbox_clses[batch_i][bbox_scores_keep]  # (B, K, 1) -> (K, 1)
+
+            # bbox_scores_per_img = bbox_scores_per_img[bbox_scores_keep]  # (K, 1) ∩ (K,) -> (#pos, 1)
+            # bboxes_per_img = bboxes[batch_i][bbox_scores_keep]  # (B, K, 4) -> (K, 4) ∩ (K,) -> (#pos, 4)
+            # kp_scores_per_img = kp_scores_per_img[kp_scores_keep]  # (K, #kp)
+            # kps_per_img = kps[batch_i][kp_scores_keep]  # (B, K, #kp x 2) ->
+
             bboxes_per_img[:, 0::2] = bboxes_per_img[:, 0::2].clamp(min=0, max=img_shape[1] - 1)
             bboxes_per_img[:, 1::2] = bboxes_per_img[:, 1::2].clamp(min=0, max=img_shape[0] - 1)
+            # TOCHECK: Clamp keypoints out of scope?
+            # kps_per_img[:, 0::2] = kps_per_img[:, 0::2].clamp(min=0, max=img_shape[1] - 1)
+            # kps_per_img[:, 1::2] = kps_per_img[:, 1::2].clamp(min=0, max=img_shape[0] - 1)
 
             if rescale:
-                scale_factor = img_metas[batch_i]['scale_factor']  # TOCHECK: what's this?
+                scale_factor = img_metas[batch_i]['scale_factor']
                 bboxes_per_img /= bboxes_per_img.new_tensor(scale_factor)
+                kps_per_img /= kps_per_img.new_tensor(scale_factor[:2])
+            kps_per_img = kps_per_img.view(kps.size(1), -1)
+            bboxes_per_img = torch.cat([bboxes_per_img, bbox_scores_per_img], dim=1)  # (K, 4 + 1)
+            kps_per_img = torch.cat([kps_per_img, kp_scores_per_img], dim=1)  # (K, 34 + 17)
+            labels_per_img = labels_per_img.squeeze(-1)  # (K, 1) -> (K,)
+            # TODO: add concat() to (K, 56) for softnms39().
+            bbox_result_list.append((bboxes_per_img, labels_per_img))
+            kp_result_list.append(kps_per_img)
 
-            bboxes_per_img = torch.cat([bboxes_per_img, scores_per_img], dim=1)  # (topk, 4 + 1)
-            labels_per_img = labels_per_img.squeeze(-1)  # (topk, 1) -> (topk,)
-            result_list.append((bboxes_per_img, labels_per_img))
-
-        return result_list
+        return bbox_result_list, kp_result_list
 
     @force_fp32(apply_to=('pred_heatmap', 'pred_wh'))
     def loss(self,
@@ -296,27 +317,6 @@ class TTFHead(BaseDenseHead):
         all_targets = self.target_generator(gt_bboxes, gt_labels, img_metas)  # heatmap, box_target, reg_weight
         hm_loss, wh_loss = self.loss_calc(pred_heatmap, pred_wh, *all_targets)
         return {'loss_heatmap': hm_loss, 'loss_wh': wh_loss}
-
-    def _topk(self, scores, topk):
-        batch, cls, height, width = scores.size()
-
-        # both are (batch, 80, topk) -> (B, #cls, HxW) -> (B, #cls, topk)
-        topk_scores, topk_inds = torch.topk(scores.view(batch, cls, -1), topk)
-
-        topk_inds = topk_inds % (height * width)  # (B, #cls, topk)
-        topk_ys = torch.floor_divide(topk_inds, width).float()  # (B, #cls, topk)
-        topk_xs = (topk_inds % width).int().float()  # (B, #cls, topk)
-
-        # both are (batch, topk). select topk from (B, #cls x topk)
-        topk_score, topk_ind = torch.topk(topk_scores.view(batch, -1), topk)
-        topk_clses = torch.floor_divide(topk_ind, topk).int()
-        topk_ind = topk_ind.unsqueeze(2)  # > (B, topk) -> (B, topk, 1)
-        # `topk_inds`: (B, #cls, topk) -> (B, #cls x topk, 1) ∩ (B, topk, 1) -> (B, topk)
-        topk_inds = topk_inds.view(batch, -1, 1).gather(1, topk_ind).view(batch, topk)
-        topk_ys = topk_ys.view(batch, -1, 1).gather(1, topk_ind).view(batch, topk)
-        topk_xs = topk_xs.view(batch, -1, 1).gather(1, topk_ind).view(batch, topk)
-
-        return topk_score, topk_inds, topk_clses, topk_ys, topk_xs
 
     def gaussian_2d(self, shape, sigma_x=1, sigma_y=1):
         m, n = [(ss - 1.) / 2. for ss in shape]
@@ -366,18 +366,18 @@ class TTFHead(BaseDenseHead):
         heatmap = gt_boxes.new_zeros((heatmap_channel, output_h, output_w))  # > (#cls, H, W)
         fake_heatmap = gt_boxes.new_zeros((output_h, output_w))  # > (H, W)
         # > `wh_planes`: 4
-        box_target = gt_boxes.new_ones((self.wh_planes, output_h, output_w)) * -1  # > (4, 128, 128)
-        reg_weight = gt_boxes.new_zeros((self.wh_planes // 4, output_h, output_w))  # > (1, 128, 128)
+        box_target = gt_boxes.new_ones((self.ct_head_cfg.plane, output_h, output_w)) * -1  # > (4, 128, 128)
+        reg_weight = gt_boxes.new_zeros((self.ct_head_cfg.plane // 4, output_h, output_w))  # > (1, 128, 128)
 
-        if self.wh_area_process == 'log':  # <-
+        if self.ct_head_cfg.area_process == 'log':  # <-
             boxes_areas_log = bbox_areas(gt_boxes).log()  # TOCHECK: why use `log`? See Eq(7)
-        elif self.wh_area_process == 'sqrt':
+        elif self.ct_head_cfg.area_process == 'sqrt':
             boxes_areas_log = bbox_areas(gt_boxes).sqrt()
         else:
             boxes_areas_log = bbox_areas(gt_boxes)
         boxes_area_topk_log, boxes_ind = torch.topk(boxes_areas_log, boxes_areas_log.size(0))  # sort descending
 
-        if self.wh_area_process == 'norm':
+        if self.ct_head_cfg.area_process == 'norm':
             boxes_area_topk_log[:] = 1.
 
         gt_boxes = gt_boxes[boxes_ind]
@@ -399,11 +399,11 @@ class TTFHead(BaseDenseHead):
         # `wh_gaussian`: True, `alpha`: 0.54, `beta`: 0.54
         h_radiuses_alpha = (feat_hs / 2. * self.alpha).int()  # > TOCHECK: why?
         w_radiuses_alpha = (feat_ws / 2. * self.alpha).int()
-        if self.wh_gaussian and self.alpha != self.beta:
+        if self.ct_head_cfg.with_gaussian and self.alpha != self.beta:
             h_radiuses_beta = (feat_hs / 2. * self.beta).int()
             w_radiuses_beta = (feat_ws / 2. * self.beta).int()
 
-        if not self.wh_gaussian:
+        if not self.ct_head_cfg.with_gaussian:
             # calculate positive (center) regions
             r1 = (1 - self.beta) / 2
             ctr_x1s, ctr_y1s, ctr_x2s, ctr_y2s = calc_region(gt_boxes.transpose(0, 1), r1)
@@ -423,7 +423,7 @@ class TTFHead(BaseDenseHead):
                                         w_radiuses_alpha[k].item())  # (#obj,) -> scalar
             heatmap[cls_id] = torch.max(heatmap[cls_id], fake_heatmap)
 
-            if self.wh_gaussian:  # <-
+            if self.ct_head_cfg.with_gaussian:  # <-
                 if self.alpha != self.beta:
                     fake_heatmap = fake_heatmap.zero_()
                     self.draw_truncate_gaussian(fake_heatmap, ct_ints[k],
@@ -435,13 +435,13 @@ class TTFHead(BaseDenseHead):
                 box_target_inds = torch.zeros_like(fake_heatmap, dtype=torch.uint8)
                 box_target_inds[ctr_y1:ctr_y2 + 1, ctr_x1:ctr_x2 + 1] = 1
 
-            if self.wh_agnostic:  # <-
+            if self.ct_head_cfg.with_agnostic:  # <-
                 box_target[:, box_target_inds] = gt_boxes[k][:, None]
                 cls_id = 0
             else:
                 box_target[(cls_id * 4):((cls_id + 1) * 4), box_target_inds] = gt_boxes[k][:, None]
 
-            if self.wh_gaussian:  # <-
+            if self.ct_head_cfg.with_gaussian:  # <-
                 local_heatmap = fake_heatmap[box_target_inds]
                 ct_div = local_heatmap.sum()
                 local_heatmap *= boxes_area_topk_log[k]  # TOCHECK: why multiply this?  normalized?

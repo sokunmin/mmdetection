@@ -83,7 +83,7 @@ def parse_args():
         help='job launcher')
     parser.add_argument(
         '--ckpt-module',
-        choices=['mmcv', 'fcos', 'embedmask', 'simplepose', 'ttfnet'],
+        choices=['mmcv', 'fcos', 'embedmask', 'simplepose', 'ttfnet', 'centernet'],
         default='mmcv',
         help='name of converter')
     parser.add_argument('--local_rank', type=int, default=0)
@@ -176,7 +176,7 @@ def main():
         model = fuse_conv_bn(model)
     # old versions did not save class info in checkpoints, this walkaround is
     # for backward compatibility
-    if 'CLASSES' in checkpoint['meta']:
+    if 'meta' in checkpoint and 'CLASSES' in checkpoint['meta']:
         model.CLASSES = checkpoint['meta']['CLASSES']
     else:
         model.CLASSES = dataset.CLASSES

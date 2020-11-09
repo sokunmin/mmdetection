@@ -196,6 +196,10 @@ class CocoDataset(CustomDataset):
             _bbox[3] - _bbox[1],
         ]
 
+    def keypoint2xyv(self, keypoint):
+        # [:self.num_keypoints * 3].tolist()
+        pass
+
     def _proposal2json(self, results):
         """Convert proposal results to COCO json style."""
         json_results = []
@@ -266,6 +270,20 @@ class CocoDataset(CustomDataset):
                     segm_json_results.append(data)
         return bbox_json_results, segm_json_results
 
+    def _pose2json(self, results):
+        json_results = []
+        for idx in range(len(self)):
+            img_id = self.img_ids[idx]
+            keypoints, score = results[idx]
+            for i in range(keypoints.shape[0]):  # > #person
+                data = dict()
+                data['image_id'] = img_id
+                data['keypoints'] = self.keypoint2xyv(keypoints)
+                data['score'] = score[i]
+                data['category_id'] = 1
+                json_results.append(data)
+        return json_results
+
     def results2json(self, results, outfile_prefix):
         """Dump the detection results to a COCO style json file.
 
@@ -306,6 +324,42 @@ class CocoDataset(CustomDataset):
             raise TypeError('invalid type of results')
         return result_files
 
+    def multiresults2json(self, results, outfile_prefix, metrics):
+        result_files = dict()
+        if len(metrics) == 1:
+            if 'bbox' in metrics:
+                json_results = self._det2json(results)
+                result_files['bbox'] = f'{outfile_prefix}.bbox.json'
+                result_files['proposal'] = f'{outfile_prefix}.bbox.json'
+                mmcv.dump(json_results, result_files['bbox'])
+            elif 'proposal' in metrics:
+                json_results = self._proposal2json(results)
+                result_files['proposal'] = f'{outfile_prefix}.proposal.json'
+                mmcv.dump(json_results, result_files['proposal'])
+            elif 'segm' in metrics:
+                json_results = self._segm2json(results)
+                result_files['segm'] = f'{outfile_prefix}.segm.json'
+                mmcv.dump(json_results, result_files['segm'])
+            elif 'keypoint' in metrics:
+                json_results = self._pose2json(results)
+                result_files['keypoint'] = f'{outfile_prefix}.keypoint.json'
+                mmcv.dump(json_results, result_files['keypoint'])
+        else:
+            if 'segm' in metrics:
+                json_results = self._segm2json(results)
+                result_files['bbox'] = f'{outfile_prefix}.bbox.json'
+                result_files['proposal'] = f'{outfile_prefix}.bbox.json'
+                result_files['segm'] = f'{outfile_prefix}.segm.json'
+                mmcv.dump(json_results[metrics.index('bbox')], result_files['bbox'])
+                mmcv.dump(json_results[metrics.index('segm')], result_files['segm'])
+            if 'keypoint' in metrics:
+                json_results = self._pose2json(results)
+                result_files['keypoint'] = f'{outfile_prefix}.keypoint.json'
+                mmcv.dump(json_results[metrics.index('keypoint')], result_files['keypoint'])
+        if not all(k in ['bbox', 'proposal', 'segm', 'keypoint'] for k in metrics):
+            raise TypeError('invalid type of results')
+        return result_files
+
     def fast_eval_recall(self, results, proposal_nums, iou_thrs, logger=None):
         gt_bboxes = []
         for i in range(len(self.img_ids)):
@@ -330,7 +384,7 @@ class CocoDataset(CustomDataset):
         ar = recalls.mean(axis=1)
         return ar
 
-    def format_results(self, results, jsonfile_prefix=None, **kwargs):
+    def format_results(self, results, jsonfile_prefix=None, metrics=['bbox'], **kwargs):
         """Format the results to json (standard format for COCO evaluation).
 
         Args:
@@ -355,7 +409,10 @@ class CocoDataset(CustomDataset):
             jsonfile_prefix = osp.join(tmp_dir.name, 'results')
         else:
             tmp_dir = None
-        result_files = self.results2json(results, jsonfile_prefix)
+        if len(metrics) == 1:
+            result_files = self.results2json(results, jsonfile_prefix)
+        else:
+            result_files = self.multiresults2json(results, jsonfile_prefix, metrics)
         return result_files, tmp_dir
 
     def evaluate(self,
@@ -399,7 +456,7 @@ class CocoDataset(CustomDataset):
         """
 
         metrics = metric if isinstance(metric, list) else [metric]
-        allowed_metrics = ['bbox', 'segm', 'proposal', 'proposal_fast']
+        allowed_metrics = ['bbox', 'segm', 'proposal', 'proposal_fast', 'keypoints']
         for metric in metrics:
             if metric not in allowed_metrics:
                 raise KeyError(f'metric {metric} is not supported')
@@ -410,7 +467,7 @@ class CocoDataset(CustomDataset):
             if not isinstance(metric_items, list):
                 metric_items = [metric_items]
 
-        result_files, tmp_dir = self.format_results(results, jsonfile_prefix)
+        result_files, tmp_dir = self.format_results(results, jsonfile_prefix, metric)
 
         eval_results = {}
         cocoGt = self.coco

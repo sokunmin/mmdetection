@@ -1,4 +1,6 @@
 import torch
+import torch.nn as nn
+
 from mmcv.ops.nms import batched_nms
 
 from mmdet.core.bbox.iou_calculators import bbox_overlaps
@@ -144,3 +146,14 @@ def fast_nms(multi_bboxes,
 
     cls_dets = torch.cat([boxes, scores[:, None]], dim=1)
     return cls_dets, classes, coeffs
+
+
+def simple_nms(heat, kernel=3, out_heat=None):
+    pad = (kernel - 1) // 2
+    hmax = nn.functional.max_pool2d(heat,
+                                    (kernel, kernel),
+                                    stride=1,
+                                    padding=pad)
+    keep = (hmax == heat).float()
+    out_heat = heat if out_heat is None else out_heat
+    return out_heat * keep

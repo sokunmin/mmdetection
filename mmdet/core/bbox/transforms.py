@@ -116,6 +116,15 @@ def bbox2result(bboxes, labels, num_classes):
         return [bboxes[labels == i, :] for i in range(num_classes)]
 
 
+def keypoint2result(keypoints):
+    if keypoints.shape[0] == 0:
+        return [np.zeros(0, 51, dtype=np.float32)]
+    else:
+        if isinstance(keypoints, torch.Tensor):
+            keypoints = keypoints.cpu().numpy()
+        return keypoints
+
+
 def distance2bbox(points, distance, max_shape=None):
     """Decode distance prediction to bounding box.
 

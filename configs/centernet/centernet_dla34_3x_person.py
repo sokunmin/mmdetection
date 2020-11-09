@@ -4,31 +4,36 @@ _base_ = [
 
 # model settings
 model = dict(
-    type='TTFNet',
-    pretrained='./pretrain/darknet53.pth',
+    type='CenterNet',
+    pretrained='./pretrain/dla34-ba72cf86.pth',
     backbone=dict(
-        type='DarknetV3',
-        layers=[1, 2, 8, 8, 4],
-        inplanes=[3, 32, 64, 128, 256, 512],
-        planes=[32, 64, 128, 256, 512, 1024],
-        norm_cfg=dict(type='BN'),
-        out_indices=(1, 2, 3, 4),
-        frozen_stages=1,
-        norm_eval=False),
+        type='DLASeg',
+        levels=[1, 1, 1, 2, 2, 1],
+        channels=[16, 32, 64, 128, 256, 512],
+        down_ratio=4,
+        last_level=5),
     neck=None,
     bbox_head=dict(
-        type='TTFHead',
-        inplanes=(128, 256, 512, 1024),
-        head_conv_channel=128,
-        wh_conv_channel=64,
-        num_hm_convs=2,
-        num_wh_convs=2,
-        num_classes=80,
-        wh_offset_base=16,
-        wh_agnostic=True,
-        wh_gaussian=True,
-        shortcut_cfg=(1, 2, 3),
-        norm_cfg=dict(type='BN'),
+        type='CenterHead',
+        in_channels=64,
+        feat_channels=256,
+        use_dla=True,
+        down_ratio=4,
+        num_classes=1,
+        stacked_convs=1,
+        ct_head_cfg=dict(
+            wh_out_channels=2,
+            reg_out_channels=2,
+            offset_base=16.,
+            area_process='log',
+            with_agnostic=True,
+            with_gaussian=True
+        ),
+        kp_head_cfg=dict(
+            ct_out_channels=17,
+            reg_out_channels=34,
+            offset_out_channels=2
+        ),
         alpha=0.54,
         loss_cls=dict(
             type='CenterFocalLoss',
@@ -42,10 +47,9 @@ train_cfg = dict(
     debug=False)
 test_cfg = dict(
     score_thr=0.01,
+    kp_score_thr=0.1,
     max_per_img=100)
 # dataset settings
-dataset_type = 'CocoDataset'
-data_root = 'data/coco/'
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 train_pipeline = [
@@ -73,14 +77,16 @@ test_pipeline = [
             dict(type='Collect', keys=['img']),
         ])
 ]
+
+classes = ('person', )
 data = dict(
-    samples_per_gpu=12,
+    samples_per_gpu=24,
     workers_per_gpu=2,
-    train=dict(pipeline=train_pipeline),
-    val=dict(pipeline=test_pipeline),
-    test=dict(pipeline=test_pipeline))
+    train=dict(classes=classes, pipeline=train_pipeline),
+    val=dict(classes=classes, pipeline=test_pipeline),
+    test=dict(classes=classes, pipeline=test_pipeline))
 # optimizer
-optimizer = dict(type='SGD', lr=0.015, momentum=0.9, weight_decay=0.0004,
+optimizer = dict(type='SGD', lr=0.03, momentum=0.9, weight_decay=0.0004,
                  paramwise_cfg=dict(bias_lr_mult=2., bias_decay_mult=0.))
 optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 # learning policy
@@ -89,7 +95,7 @@ lr_config = dict(
     warmup='linear',
     warmup_iters=500,
     warmup_ratio=1.0 / 5,
-    step=[9, 11])
+    step=[18, 22])
 checkpoint_config = dict(interval=1)
 # runtime settings
-total_epochs = 12
+total_epochs = 24
