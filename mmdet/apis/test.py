@@ -3,20 +3,22 @@ import pickle
 import shutil
 import tempfile
 import time
-
+import cv2
 import mmcv
 import torch
 import torch.distributed as dist
+from mmcv.image import tensor2imgs
 from mmcv.runner import get_dist_info
 
-from mmdet.core import encode_mask_results, tensor2imgs
+from mmdet.core import encode_mask_results
 
 
 def single_gpu_test(model,
                     data_loader,
                     show=False,
                     out_dir=None,
-                    show_score_thr=0.3):
+                    show_score_thr=0.3,
+                    metrics=['bbox']):
     model.eval()
     results = []
     dataset = data_loader.dataset
@@ -32,7 +34,7 @@ def single_gpu_test(model,
             else:
                 img_tensor = data['img'][0].data[0]
             img_metas = data['img_metas'][0].data[0]
-            imgs = tensor2imgs(img_tensor, **img_metas[0]['img_norm_cfg'])
+            imgs = tensor2imgs(img_tensor, **img_metas[0]['img_norm_cfg'])  # Denormalize RGB/255
             assert len(imgs) == len(img_metas)
 
             for i, (img, img_meta) in enumerate(zip(imgs, img_metas)):
@@ -55,7 +57,7 @@ def single_gpu_test(model,
                     score_thr=show_score_thr)
 
         # encode mask results
-        if isinstance(result[0], tuple):
+        if isinstance(result[0], tuple) and metrics is not None and 'segm' in metrics:
             result = [(bbox_results, encode_mask_results(mask_results))
                       for bbox_results, mask_results in result]
         results.extend(result)
@@ -124,7 +126,8 @@ def collect_results_cpu(result_part, size, tmpdir=None):
                                 dtype=torch.uint8,
                                 device='cuda')
         if rank == 0:
-            tmpdir = tempfile.mkdtemp()
+            mmcv.mkdir_or_exist('.dist_test')
+            tmpdir = tempfile.mkdtemp(dir='.dist_test')
             tmpdir = torch.tensor(
                 bytearray(tmpdir.encode()), dtype=torch.uint8, device='cuda')
             dir_tensor[:len(tmpdir)] = tmpdir

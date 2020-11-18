@@ -16,7 +16,8 @@ from .custom import CustomDataset
 
 try:
     import pycocotools
-    assert pycocotools.__version__ >= '12.0.2'
+    if not hasattr(pycocotools, '__sphinx_mock__'):  # for doc generation
+        assert pycocotools.__version__ >= '12.0.2'
 except AssertionError:
     raise AssertionError('Incompatible version of pycocotools is installed. '
                          'Run pip uninstall pycocotools first. Then run pip '
@@ -55,7 +56,7 @@ class CocoDataset(CustomDataset):
         self.coco = COCO(ann_file)
         self.cat_ids = self.coco.get_cat_ids(cat_names=self.CLASSES)
         self.cat2label = {cat_id: i for i, cat_id in enumerate(self.cat_ids)}
-        self.img_ids = self.coco.get_img_ids()
+        self.img_ids = self.coco.get_img_ids()  # TOCHECK: add `cat_ids`
         data_infos = []
         for i in self.img_ids:
             info = self.coco.load_imgs([i])[0]
@@ -196,16 +197,17 @@ class CocoDataset(CustomDataset):
             _bbox[3] - _bbox[1],
         ]
 
-    def keypoint2xyv(self, keypoint):
-        # [:self.num_keypoints * 3].tolist()
-        pass
+    def xyvs2xyv(self, keypoint):
+        return keypoint[:-1].tolist()
 
-    def _proposal2json(self, results):
+    def _proposal2json(self, results, metric_ind=None):
         """Convert proposal results to COCO json style."""
         json_results = []
         for idx in range(len(self)):
             img_id = self.img_ids[idx]
-            bboxes = results[idx]
+            result = results[idx]
+            result = result if metric_ind is None else results[metric_ind]
+            bboxes = result
             for i in range(bboxes.shape[0]):
                 data = dict()
                 data['image_id'] = img_id
@@ -215,13 +217,14 @@ class CocoDataset(CustomDataset):
                 json_results.append(data)
         return json_results
 
-    def _det2json(self, results):
+    def _det2json(self, results, metric_ind=None):
         """Convert detection results to COCO json style."""
         json_results = []
         for idx in range(len(self)):
             img_id = self.img_ids[idx]
             result = results[idx]
-            for label in range(len(result)):
+            result = result if metric_ind is None else result[metric_ind]
+            for label in range(len(result)):  # > #cls
                 bboxes = result[label]
                 for i in range(bboxes.shape[0]):
                     data = dict()
@@ -232,13 +235,14 @@ class CocoDataset(CustomDataset):
                     json_results.append(data)
         return json_results
 
-    def _segm2json(self, results):
+    def _segm2json(self, results, metric_ind=None):
         """Convert instance segmentation results to COCO json style."""
         bbox_json_results = []
         segm_json_results = []
         for idx in range(len(self)):
             img_id = self.img_ids[idx]
-            det, seg = results[idx]
+            result = results[idx]
+            det, seg = result
             for label in range(len(det)):
                 # bbox results
                 bboxes = det[label]
@@ -270,18 +274,21 @@ class CocoDataset(CustomDataset):
                     segm_json_results.append(data)
         return bbox_json_results, segm_json_results
 
-    def _pose2json(self, results):
+    def _pose2json(self, results, metric_ind=None):
         json_results = []
-        for idx in range(len(self)):
+        for idx in range(len(self)):  # > #imgs
             img_id = self.img_ids[idx]
-            keypoints, score = results[idx]
-            for i in range(keypoints.shape[0]):  # > #person
-                data = dict()
-                data['image_id'] = img_id
-                data['keypoints'] = self.keypoint2xyv(keypoints)
-                data['score'] = score[i]
-                data['category_id'] = 1
-                json_results.append(data)
+            result = results[idx]
+            result = result if metric_ind is None else result[metric_ind]
+            for label in range(len(result)):  # > #cls
+                keypoints = result[label]
+                for i in range(keypoints.shape[0]):  # > #topk
+                    data = dict()
+                    data['image_id'] = img_id
+                    data['keypoints'] = self.xyvs2xyv(keypoints[i])
+                    data['score'] = float(keypoints[i][-1])
+                    data['category_id'] = self.cat_ids[label]
+                    json_results.append(data)
         return json_results
 
     def results2json(self, results, outfile_prefix):
@@ -326,37 +333,20 @@ class CocoDataset(CustomDataset):
 
     def multiresults2json(self, results, outfile_prefix, metrics):
         result_files = dict()
-        if len(metrics) == 1:
-            if 'bbox' in metrics:
-                json_results = self._det2json(results)
-                result_files['bbox'] = f'{outfile_prefix}.bbox.json'
-                result_files['proposal'] = f'{outfile_prefix}.bbox.json'
-                mmcv.dump(json_results, result_files['bbox'])
-            elif 'proposal' in metrics:
-                json_results = self._proposal2json(results)
-                result_files['proposal'] = f'{outfile_prefix}.proposal.json'
-                mmcv.dump(json_results, result_files['proposal'])
-            elif 'segm' in metrics:
-                json_results = self._segm2json(results)
-                result_files['segm'] = f'{outfile_prefix}.segm.json'
-                mmcv.dump(json_results, result_files['segm'])
-            elif 'keypoint' in metrics:
-                json_results = self._pose2json(results)
-                result_files['keypoint'] = f'{outfile_prefix}.keypoint.json'
-                mmcv.dump(json_results, result_files['keypoint'])
-        else:
-            if 'segm' in metrics:
-                json_results = self._segm2json(results)
-                result_files['bbox'] = f'{outfile_prefix}.bbox.json'
-                result_files['proposal'] = f'{outfile_prefix}.bbox.json'
-                result_files['segm'] = f'{outfile_prefix}.segm.json'
-                mmcv.dump(json_results[metrics.index('bbox')], result_files['bbox'])
-                mmcv.dump(json_results[metrics.index('segm')], result_files['segm'])
-            if 'keypoint' in metrics:
-                json_results = self._pose2json(results)
-                result_files['keypoint'] = f'{outfile_prefix}.keypoint.json'
-                mmcv.dump(json_results[metrics.index('keypoint')], result_files['keypoint'])
-        if not all(k in ['bbox', 'proposal', 'segm', 'keypoint'] for k in metrics):
+        if 'bbox' in metrics:
+            json_results = self._det2json(results, metrics.index('bbox'))
+            result_files['bbox'] = f'{outfile_prefix}.bbox.json'
+            result_files['proposal'] = f'{outfile_prefix}.bbox.json'
+            mmcv.dump(json_results, result_files['bbox'])
+        if 'segm' in metrics:
+            json_results = self._segm2json(results, metrics.index('segm'))
+            result_files['segm'] = f'{outfile_prefix}.segm.json'
+            mmcv.dump(json_results[metrics.index('segm')], result_files['segm'])  # TOCHECK: remove `[metrics.index('segm')]`
+        if 'keypoints' in metrics:
+            json_results = self._pose2json(results, metrics.index('keypoints'))
+            result_files['keypoints'] = f'{outfile_prefix}.keypoints.json'
+            mmcv.dump(json_results, result_files['keypoints'])
+        if not all(k in ['bbox', 'proposal', 'segm', 'keypoints'] for k in metrics):
             raise TypeError('invalid type of results')
         return result_files
 
@@ -467,7 +457,7 @@ class CocoDataset(CustomDataset):
             if not isinstance(metric_items, list):
                 metric_items = [metric_items]
 
-        result_files, tmp_dir = self.format_results(results, jsonfile_prefix, metric)
+        result_files, tmp_dir = self.format_results(results, jsonfile_prefix, metrics)
 
         eval_results = {}
         cocoGt = self.coco

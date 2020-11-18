@@ -9,7 +9,7 @@ def load_checkpoint(model,
                     map_location=None,
                     strict=False,
                     logger=None,
-                    show_model_arch=False,
+                    show_model_arch=True,
                     print_keys=True):
     """ Note that official pre-trained models use `GroupNorm` in backbone.
       """
@@ -17,8 +17,8 @@ def load_checkpoint(model,
         raise IOError('{} is not a checkpoint file'.format(filename))
     checkpoint = torch.load(filename, map_location=map_location)
     # get state_dict from checkpoint
-    if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
-        state_dict = checkpoint['state_dict']
+    if isinstance(checkpoint, dict) and 'model' in checkpoint:
+        state_dict = checkpoint['model']
     else:
         raise RuntimeError(
             'No state_dict found in checkpoint file {}'.format(filename))
@@ -31,20 +31,44 @@ def load_checkpoint(model,
     if list(state_dict.keys())[0].startswith('backbone'):
         for k, v in state_dict.items():
             new_k = k
-            if 'backbone_model.' in new_k:
-                new_k = new_k.replace("backbone_model.", "backbone.")
-            if 'conv_offset_mask.' in new_k:
-                new_k = new_k.replace("conv_offset_mask.", "conv_offset.")
-            if 'head_model.' in new_k:
-                new_k = new_k.replace("head_model.", "bbox_head.")
-                if '0.weight' in new_k:
-                    new_k = new_k.replace("0.weight", "0.conv.weight")
-                if '0.bias' in new_k:
-                    new_k = new_k.replace("0.bias", "0.conv.bias")
-                if '2.weight' in new_k:
-                    new_k = new_k.replace("2.weight", "1.weight")
-                if '2.bias' in new_k:
-                    new_k = new_k.replace("2.bias", "1.bias")
+            if 'stage0.' in new_k:
+                if "stage0.0.":
+                    new_k = new_k.replace("stage0.0.", "conv1.")
+                if "stage0.1.":
+                    new_k = new_k.replace("stage0.1.", "bn1.")
+            if 'stage1.' in new_k:
+                new_k = new_k.replace("stage1.", "layer1.")
+            if 'stage2.' in new_k:
+                new_k = new_k.replace("stage2.", "layer2.")
+            if 'stage3.' in new_k:
+                new_k = new_k.replace("stage3.", "layer3.")
+            if 'stage4.' in new_k:
+                new_k = new_k.replace("stage4.", "layer4.")
+            if 'upsample.deconv' in new_k:
+                new_k = new_k.replace("upsample.", "bbox_head.")
+                if 'deconv1' in new_k:
+                    new_k = new_k.replace("deconv1.", "upsamples.0.")
+                if 'deconv2' in new_k:
+                    new_k = new_k.replace("deconv2.", "upsamples.1.")
+                if 'deconv3' in new_k:
+                    new_k = new_k.replace("deconv3.", "upsamples.2.")
+                if 'offset_mask_conv.' in new_k:
+                    new_k = new_k.replace("offset_mask_conv.", "conv_offset.")
+                if 'dcnv2.' in new_k:
+                    new_k = new_k.replace("dcnv2.", "")
+            if 'head.' in new_k:
+                if 'head.cls_head.feat_conv' in new_k:
+                    new_k = new_k.replace("head.cls_head.feat_conv", "bbox_head.cls_head.0.conv")
+                if 'head.cls_head.out_conv' in new_k:
+                    new_k = new_k.replace("head.cls_head.out_conv", "bbox_head.cls_head.1")
+                if 'head.wh_head.feat_conv' in new_k:
+                    new_k = new_k.replace("head.wh_head.feat_conv", "bbox_head.wh_head.0.conv")
+                if 'head.wh_head.out_conv' in new_k:
+                    new_k = new_k.replace("head.wh_head.out_conv", "bbox_head.wh_head.1")
+                if 'head.reg_head.feat_conv' in new_k:
+                    new_k = new_k.replace("head.reg_head.feat_conv", "bbox_head.reg_head.0.conv")
+                if 'head.reg_head.out_conv' in new_k:
+                    new_k = new_k.replace("head.reg_head.out_conv", "bbox_head.reg_head.1")
 
             if print_keys:
                 print('> key = ', k, ' -> ', new_k)

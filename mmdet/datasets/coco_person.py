@@ -62,8 +62,8 @@ class CocoPersonDataset(CocoDataset):
             print("The dataset json does not contain `skeleton` key.")
             self.skeleton = None
         self.num_keypoints = len(self.KEYPOINTS)
-        self.joint_flip_pairs = np.array([[1, 2], [3, 4], [5, 6], [7, 8],
-                                          [9, 10], [11, 12], [13, 14], [15, 16]])
+        self.joint_flip_pairs = np.array([[1, 2], [3, 4], [5, 6], [7, 8], [9, 10],
+                                          [11, 12], [13, 14], [15, 16]])
         return data_infos
 
     def get_ann_info(self, idx):

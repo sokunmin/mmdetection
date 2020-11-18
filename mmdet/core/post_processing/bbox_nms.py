@@ -148,12 +148,11 @@ def fast_nms(multi_bboxes,
     return cls_dets, classes, coeffs
 
 
-def simple_nms(heat, kernel=3, out_heat=None):
-    pad = (kernel - 1) // 2
-    hmax = nn.functional.max_pool2d(heat,
-                                    (kernel, kernel),
-                                    stride=1,
-                                    padding=pad)
-    keep = (hmax == heat).float()
-    out_heat = heat if out_heat is None else out_heat
-    return out_heat * keep
+def simple_nms(fmap, pool_size=3):
+    pad = (pool_size - 1) // 2
+    fmap_max = nn.functional.max_pool2d(fmap,
+                                       (pool_size, pool_size),
+                                       stride=1,
+                                       padding=pad)
+    keep = (fmap_max == fmap).float()
+    return fmap * keep

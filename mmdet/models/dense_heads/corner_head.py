@@ -668,7 +668,7 @@ class CornerHead(BaseDenseHead):
         """
         assert tl_heats[-1].shape[0] == br_heats[-1].shape[0] == len(img_metas)
         result_list = []
-        for img_id in range(len(img_metas)):
+        for img_id in range(len(img_metas)):  # > #img
             result_list.append(
                 self._get_bboxes_single(
                     tl_heats[-1][img_id:img_id + 1, :],
