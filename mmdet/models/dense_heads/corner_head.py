@@ -365,18 +365,18 @@ class CornerHead(BaseDenseHead):
                 - bottomright_centripetal_shift (Tensor): Ground truth
                   bottom-right corner centripetal shift. Not must have.
         """
-        batch_size, _, height, width = feat_shape
-        img_h, img_w = img_shape[:2]
-
+        batch_size, _, height, width = feat_shape  # feat size (128, 128)
+        img_h, img_w = img_shape[:2]  # > output size (511, 511)
+        # > feat_size / output_size
         width_ratio = float(width / img_w)
         height_ratio = float(height / img_h)
-
+        # > `gt_bboxes`: (#img, #obj, 4), `H/W`: 128
         gt_tl_heatmap = gt_bboxes[-1].new_zeros(
-            [batch_size, self.num_classes, height, width])
+            [batch_size, self.num_classes, height, width])  # > (#img, #cls, H, W)
         gt_br_heatmap = gt_bboxes[-1].new_zeros(
-            [batch_size, self.num_classes, height, width])
-        gt_tl_offset = gt_bboxes[-1].new_zeros([batch_size, 2, height, width])
-        gt_br_offset = gt_bboxes[-1].new_zeros([batch_size, 2, height, width])
+            [batch_size, self.num_classes, height, width])  # > (#img, #cls, H, W)
+        gt_tl_offset = gt_bboxes[-1].new_zeros([batch_size, 2, height, width])  # > (#img, 2, H, W)
+        gt_br_offset = gt_bboxes[-1].new_zeros([batch_size, 2, height, width])  # > (#img, 2, H, W)
 
         if with_corner_emb:
             match = []
@@ -395,10 +395,10 @@ class CornerHead(BaseDenseHead):
             gt_br_centripetal_shift = gt_bboxes[-1].new_zeros(
                 [batch_size, 2, height, width])
 
-        for batch_id in range(batch_size):
+        for batch_id in range(batch_size):  # > #img
             # Ground truth of corner embedding per image is a list of coord set
             corner_match = []
-            for box_id in range(len(gt_labels[batch_id])):
+            for box_id in range(len(gt_labels[batch_id])):  # > #obj
                 left, top, right, bottom = gt_bboxes[batch_id][box_id]
                 center_x = (left + right) / 2.0
                 center_y = (top + bottom) / 2.0
@@ -426,21 +426,21 @@ class CornerHead(BaseDenseHead):
                 radius = max(0, int(radius))
                 gt_tl_heatmap[batch_id, label] = gen_gaussian_target(
                     gt_tl_heatmap[batch_id, label], [left_idx, top_idx],
-                    radius)
+                    radius)  # > (#img, #cls, H, W) -> (H, W)
                 gt_br_heatmap[batch_id, label] = gen_gaussian_target(
                     gt_br_heatmap[batch_id, label], [right_idx, bottom_idx],
-                    radius)
+                    radius)  # > (#img, #cls, H, W) -> (H, W)
 
                 # Generate corner offset
                 left_offset = scale_left - left_idx
                 top_offset = scale_top - top_idx
                 right_offset = scale_right - right_idx
                 bottom_offset = scale_bottom - bottom_idx
-                gt_tl_offset[batch_id, 0, top_idx, left_idx] = left_offset
-                gt_tl_offset[batch_id, 1, top_idx, left_idx] = top_offset
-                gt_br_offset[batch_id, 0, bottom_idx, right_idx] = right_offset
+                gt_tl_offset[batch_id, 0, top_idx, left_idx] = left_offset  # > (#img, 2, H, W)
+                gt_tl_offset[batch_id, 1, top_idx, left_idx] = top_offset  # > (#img, 2, H, W)
+                gt_br_offset[batch_id, 0, bottom_idx, right_idx] = right_offset  # > (#img, 2, H, W)
                 gt_br_offset[batch_id, 1, bottom_idx,
-                             right_idx] = bottom_offset
+                             right_idx] = bottom_offset  # > (#img, 2, H, W)
 
                 # Generate corner embedding
                 if with_corner_emb:

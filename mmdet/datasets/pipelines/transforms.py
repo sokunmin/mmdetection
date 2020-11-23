@@ -1675,3 +1675,36 @@ class CutOut(object):
                      else f'cutout_shape={self.candidates}, ')
         repr_str += f'fill_in={self.fill_in})'
         return repr_str
+
+
+@PIPELINES.register_module()
+class RandomLighting(object):
+
+    def __init__(self,
+                 scale,
+                 eigen_values=[
+                     [-0.5675, 0.7192, 0.4009],
+                     [-0.5808, -0.0045, -0.8140],
+                     [-0.5836, -0.6948, 0.4203]],
+                 eigen_vectors=[0.2175, 0.0188, 0.0045]):
+        self.scale = scale
+        self.eigen_values = np.array(eigen_values)
+        self.eigen_vectors = np.array(eigen_vectors)
+
+    def __call__(self, results):
+        weights = np.random.normal(scale=self.scale, size=3)
+        jitter = self.eigen_vecs.dot(weights * self.eigen_vals)
+        img = results['img']
+        if img.dtype == np.uint8:
+            img = img.astype(np.float32)
+            img = jitter + img
+            img = np.clip(img, 0, 255).astype(np.uint8)
+        else:
+            img = jitter + img
+        results['img'] = img
+        return results
+
+    def __repr__(self):
+        repr_str = self.__class__.__name__
+        repr_str += f'(scale={self.scale}, '
+        return repr_str

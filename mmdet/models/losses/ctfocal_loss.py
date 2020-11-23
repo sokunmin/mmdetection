@@ -24,17 +24,19 @@ def ct_focal_loss(pred, target, gamma=2.0):
     neg_inds = target.lt(1).float()
 
     neg_weights = torch.pow(1 - target, 4)  # reduce punishment
-    pos_loss = -torch.log(pred) * torch.pow(1 - pred, gamma) * pos_inds
-    neg_loss = -torch.log(1 - pred) * torch.pow(pred, gamma) * neg_weights * neg_inds
+    # clamp min value is set to 1e-12 to maintain the numerical stability
+    pred = torch.clamp(pred, 1e-12)
+
+    pos_loss = torch.log(pred) * torch.pow(1 - pred, gamma) * pos_inds
+    neg_loss = torch.log(1 - pred) * torch.pow(pred, gamma) * neg_weights * neg_inds
 
     num_pos = pos_inds.float().sum()
     pos_loss = pos_loss.sum()
     neg_loss = neg_loss.sum()
 
     if num_pos == 0:
-        return neg_loss
-    return pos_loss + neg_loss
-    # return (pos_loss + neg_loss) / num_pos
+        return -neg_loss
+    return -(pos_loss + neg_loss)
 
 
 @LOSSES.register_module()

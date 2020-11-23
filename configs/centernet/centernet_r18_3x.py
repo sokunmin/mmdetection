@@ -18,14 +18,10 @@ model = dict(
     neck=None,
     bbox_head=dict(
         type='CenterHead',
-        in_channels=64,
-        feat_channels=64,
-        down_ratio=4,
         num_classes=80,
-        stacked_convs=1,
-        wh_out_channels=2,
-        reg_out_channels=2,
-        norm_cfg=dict(type='BN', requires_grad=True),
+        in_channels=64,
+        num_feat_levels=1,
+        corner_emb_channels=0,
         dcn_cfg=dict(
             in_channels=(512, 256, 128, 64),
             kernels=(4, 4, 4),
@@ -33,15 +29,17 @@ model = dict(
             paddings=(1, 1, 1),
             out_paddings=(0, 0, 0)
         ),
-        loss_cls=dict(
-            type='CenterFocalLoss',
+        loss_heatmap=dict(
+            type='CenterFocalLoss',  # TOCHECK: cmp w/ `GaussianFocalLoss`
             gamma=2.0,
             loss_weight=1.0),
-        loss_bbox=dict(type='CenterGIoULoss', loss_weight=5.0)))
+        loss_offset=dict(type='L1Loss', loss_weight=1.0),
+        loss_bbox=dict(type='L1Loss', loss_weight=0.1)))
 cudnn_benchmark = True
 # training and testing settings
 train_cfg = dict(
     vis_every_n_iters=100,
+    min_overlap=0.7,
     debug=False)
 test_cfg = dict(
     score_thr=0.01,
@@ -52,7 +50,7 @@ img_norm_cfg = dict(
     mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], to_rgb=True, norm_rgb=True)
     # mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 train_pipeline = [
-    dict(type='LoadImageFromFile'),
+    dict(type='LoadImageFromFile', to_float32=True),
     dict(type='LoadAnnotations', with_bbox=True),
     dict(type='Resize', img_scale=(512, 512), keep_ratio=False),
     dict(type='RandomFlip', flip_ratio=0.5),

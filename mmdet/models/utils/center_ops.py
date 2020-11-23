@@ -7,7 +7,7 @@ def topk_channel(scores, topk):
     topk_scores, topk_inds = torch.topk(scores.view(batch, cls, -1), topk)
 
     topk_inds = topk_inds % (height * width)  # (B, #cls, topk)
-    topk_ys = torch.floor_divide(topk_inds, width).float()  # (B, #cls, topk)
+    topk_ys = (topk_inds // width).float()  # (B, #cls, topk)
     topk_xs = (topk_inds % width).float()  # (B, #cls, topk)
 
     return topk_scores, topk_inds, topk_ys, topk_xs
@@ -15,11 +15,15 @@ def topk_channel(scores, topk):
 
 def topk(scores, topk):
     batch, cls, height, width = scores.size()
-    topk_scores, topk_inds, topk_ys, topk_xs = topk_channel(scores, topk)
+    topk_scores, topk_inds = torch.topk(scores.view(batch, cls, -1), topk)
+
+    topk_inds = topk_inds % (height * width)  # (B, #cls, topk)
+    topk_ys = (topk_inds // width).float()  # (B, #cls, topk)
+    topk_xs = (topk_inds % width).float()  # (B, #cls, topk)
 
     # both are (batch, topk). select topk from (B, #cls x topk)
     topk_score, topk_ind = torch.topk(topk_scores.view(batch, -1), topk)
-    topk_clses = torch.floor_divide(topk_ind, topk)
+    topk_clses = topk_ind // topk
     # `topk_inds`: (B, #cls, topk) -> (B, #cls x topk, 1) ∩ (B, topk, 1) -> (B, topk)
     topk_inds = gather_feature(topk_inds.view(batch, -1, 1), topk_ind).view(batch, topk)
     topk_ys = gather_feature(topk_ys.view(batch, -1, 1), topk_ind).view(batch, topk)
@@ -53,6 +57,7 @@ def gather_feature(fmap, index, mask=None, use_transform=False):
         fmap = fmap[mask]
         fmap = fmap.reshape(-1, dim)
     return fmap
+
 
 def transpose_and_gather_feat(feat, ind):
     feat = feat.permute(0, 2, 3, 1).contiguous()  # (B, C, H, W) -> (B, H, W, C)

@@ -447,8 +447,7 @@ class TTFHead(BaseDenseHead):
                 local_heatmap *= boxes_area_topk_log[k]  # TOCHECK: why multiply this?  normalized?
                 reg_weight[cls_id, box_target_inds] = local_heatmap / ct_div
             else:
-                reg_weight[cls_id, box_target_inds] = \
-                    boxes_area_topk_log[k] / box_target_inds.sum().float()
+                reg_weight[cls_id, box_target_inds] = boxes_area_topk_log[k] / box_target_inds.sum().float()
 
         return heatmap, box_target, reg_weight
 
