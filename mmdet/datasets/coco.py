@@ -56,7 +56,7 @@ class CocoDataset(CustomDataset):
         self.coco = COCO(ann_file)
         self.cat_ids = self.coco.get_cat_ids(cat_names=self.CLASSES)
         self.cat2label = {cat_id: i for i, cat_id in enumerate(self.cat_ids)}
-        self.img_ids = self.coco.get_img_ids()  # TOCHECK: add `cat_ids`
+        self.img_ids = self.coco.get_img_ids()
         data_infos = []
         for i in self.img_ids:
             info = self.coco.load_imgs([i])[0]
@@ -341,7 +341,7 @@ class CocoDataset(CustomDataset):
         if 'segm' in metrics:
             json_results = self._segm2json(results, metrics.index('segm'))
             result_files['segm'] = f'{outfile_prefix}.segm.json'
-            mmcv.dump(json_results[metrics.index('segm')], result_files['segm'])  # TOCHECK: remove `[metrics.index('segm')]`
+            mmcv.dump(json_results, result_files['segm'])
         if 'keypoints' in metrics:
             json_results = self._pose2json(results, metrics.index('keypoints'))
             result_files['keypoints'] = f'{outfile_prefix}.keypoints.json'
@@ -493,7 +493,8 @@ class CocoDataset(CustomDataset):
             cocoEval = COCOeval(cocoGt, cocoDt, iou_type)
             cocoEval.params.catIds = self.cat_ids
             cocoEval.params.imgIds = self.img_ids
-            cocoEval.params.maxDets = list(proposal_nums)
+            if iou_type != 'keypoints':
+                cocoEval.params.maxDets = list(proposal_nums)
             cocoEval.params.iouThrs = iou_thrs
             # mapping of cocoEval.stats
             coco_metric_names = {

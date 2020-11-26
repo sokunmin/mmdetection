@@ -36,14 +36,26 @@ def load_checkpoint(model,
             if 'conv_offset_mask.' in new_k:
                 new_k = new_k.replace("conv_offset_mask.", "conv_offset.")
             if 'head_model.' in new_k:
-                new_k = new_k.replace("head_model.", "bbox_head.")
+                if 'head_model.hm.' in new_k:
+                    new_k = new_k.replace("head_model.hm.", "bbox_head.ct_hm_head.")
+                if 'head_model.wh.' in new_k:
+                    new_k = new_k.replace("head_model.wh.", "bbox_head.ct_wh_head.")
+                if 'head_model.reg.' in new_k:
+                    new_k = new_k.replace("head_model.reg.", "bbox_head.ct_reg_head.")
+                if 'head_model.hm_hp.' in new_k:
+                    new_k = new_k.replace("head_model.hm_hp.", "keypoint_head.kp_hm_head.")
+                if 'head_model.hp_offset.' in new_k:
+                    new_k = new_k.replace("head_model.hp_offset.", "keypoint_head.kp_reg_head.")
+                if 'head_model.hps.' in new_k:
+                    new_k = new_k.replace("head_model.hps.", "keypoint_head.ct_kp_reg_head.")
+
                 if '0.weight' in new_k:
                     new_k = new_k.replace("0.weight", "0.conv.weight")
-                if '0.bias' in new_k:
+                elif '0.bias' in new_k:
                     new_k = new_k.replace("0.bias", "0.conv.bias")
-                if '2.weight' in new_k:
+                elif '2.weight' in new_k:
                     new_k = new_k.replace("2.weight", "1.weight")
-                if '2.bias' in new_k:
+                elif '2.bias' in new_k:
                     new_k = new_k.replace("2.bias", "1.bias")
 
             if print_keys:

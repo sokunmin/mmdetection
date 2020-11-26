@@ -62,13 +62,13 @@ def load_checkpoint(model,
                 if 'head.cls_head.out_conv' in new_k:
                     new_k = new_k.replace("head.cls_head.out_conv", "bbox_head.ct_hm_head.1")
                 if 'head.wh_head.feat_conv' in new_k:
-                    new_k = new_k.replace("head.wh_head.feat_conv", "bbox_head.bbox_wh_head.0.conv")
+                    new_k = new_k.replace("head.wh_head.feat_conv", "bbox_head.ct_wh_head.0.conv")
                 if 'head.wh_head.out_conv' in new_k:
-                    new_k = new_k.replace("head.wh_head.out_conv", "bbox_head.bbox_wh_head.1")
+                    new_k = new_k.replace("head.wh_head.out_conv", "bbox_head.ct_wh_head.1")
                 if 'head.reg_head.feat_conv' in new_k:
-                    new_k = new_k.replace("head.reg_head.feat_conv", "bbox_head.bbox_reg_head.0.conv")
+                    new_k = new_k.replace("head.reg_head.feat_conv", "bbox_head.ct_reg_head.0.conv")
                 if 'head.reg_head.out_conv' in new_k:
-                    new_k = new_k.replace("head.reg_head.out_conv", "bbox_head.bbox_reg_head.1")
+                    new_k = new_k.replace("head.reg_head.out_conv", "bbox_head.ct_reg_head.1")
 
             if print_keys:
                 print('> key = ', k, ' -> ', new_k)

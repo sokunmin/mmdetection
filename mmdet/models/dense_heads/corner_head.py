@@ -1062,3 +1062,9 @@ class CornerHead(BaseDenseHead):
         clses = self._gather_feat(clses, inds).float()
 
         return bboxes, scores, clses
+
+    def preprocess(self, x, head_ins):
+        return x, head_ins
+
+    def postprocess(self, *head_outs, is_train=False):
+        return head_outs

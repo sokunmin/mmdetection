@@ -120,6 +120,7 @@ ckpt_aliases = {
     'mmcv': 'mmcv.runner',
     'ttfnet': 'tools.convert_checkpoint.ttfnet',
     'centernet': 'tools.convert_checkpoint.centernet',
+    'centerpose': 'tools.convert_checkpoint.centerpose',
 }
 
 

@@ -43,6 +43,11 @@ class BaseDetector(nn.Module, metaclass=ABCMeta):
         return ((hasattr(self, 'roi_head') and self.roi_head.with_mask)
                 or (hasattr(self, 'mask_head') and self.mask_head is not None))
 
+    @property
+    def with_keypoint(self):
+        """bool: whether the detector has a keypoint head"""
+        return hasattr(self, 'keypoint_head') and self.keypoint_head is not None
+
     @abstractmethod
     def extract_feat(self, imgs):
         """Extract features from images."""

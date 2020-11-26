@@ -2,39 +2,45 @@ _base_ = [
     '../_base_/default_runtime.py', '../_base_/datasets/coco_detection.py'
 ]
 
+dataset_type = 'CocoPersonDataset'
+data_root = 'data/coco/'
+
 # model settings
 model = dict(
     type='CenterNet',
-    pretrained='torchvision://resnet18',
+    pretrained='./pretrain/dla34-ba72cf86.pth',
     backbone=dict(
-        type='ResNet',
-        depth=18,
-        num_stages=4,
-        out_indices=(0, 1, 2, 3),
-        frozen_stages=1,
-        norm_cfg=dict(type='BN', requires_grad=True),
-        norm_eval=True,
-        style='pytorch'),
+        type='DLASeg',
+        levels=[1, 1, 1, 2, 2, 1],
+        channels=[16, 32, 64, 128, 256, 512],
+        down_ratio=4,
+        last_level=5),
     neck=None,
     bbox_head=dict(
         type='CenterHead',
-        num_classes=80,
+        num_classes=1,
         in_channels=64,
+        feat_channels=256,
         num_feat_levels=1,
         corner_emb_channels=0,
-        dcn_cfg=dict(
-            in_channels=(512, 256, 128, 64),
-            kernels=(4, 4, 4),
-            strides=(2, 2, 2),
-            paddings=(1, 1, 1),
-            out_paddings=(0, 0, 0)
-        ),
         loss_heatmap=dict(
             type='CenterFocalLoss',  # TOCHECK: cmp w/ `GaussianFocalLoss`
             gamma=2.0,
             loss_weight=1.0),
         loss_offset=dict(type='L1Loss', loss_weight=1.0),
-        loss_bbox=dict(type='L1Loss', loss_weight=0.1)))
+        loss_bbox=dict(type='L1Loss', loss_weight=0.1)),
+    keypoint_head=dict(
+        type='CenterPoseHead',
+        num_classes=17,
+        in_channels=64,
+        feat_channels=256,
+        num_feat_levels=1,
+        loss_heatmap=dict(
+            type='CenterFocalLoss',
+            gamma=2.0,
+            loss_weight=1.0),
+        loss_offset=dict(type='L1Loss', loss_weight=1.0),
+        loss_joint=dict(type='L1Loss', loss_weight=1.0)))
 cudnn_benchmark = True
 # training and testing settings
 train_cfg = dict(
@@ -47,8 +53,9 @@ test_cfg = dict(
     max_per_img=100)
 # dataset settings
 img_norm_cfg = dict(
-    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], to_rgb=True, norm_rgb=True)
-    # mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
+    mean=[0.408, 0.447, 0.470], std=[0.289, 0.274, 0.278], to_rgb=False, norm_rgb=True)
+    # mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], to_rgb=False, norm_rgb=True)
+    # mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=False, norm_rgb=True)
 train_pipeline = [
     dict(type='LoadImageFromFile', to_float32=True),
     dict(type='LoadAnnotations', with_bbox=True),
@@ -79,12 +86,28 @@ test_pipeline = [
         ])
 ]
 
+classes = ('person', )
 data = dict(
     samples_per_gpu=32,
     workers_per_gpu=2,
-    train=dict(pipeline=train_pipeline),
-    val=dict(pipeline=test_pipeline),
-    test=dict(pipeline=test_pipeline))
+    train=dict(
+        type=dataset_type,
+        classes=classes,
+        ann_file=data_root + 'annotations/person_keypoints_train2017.json',
+        img_prefix=data_root + 'train2017/',
+        pipeline=train_pipeline),
+    val=dict(
+        type=dataset_type,
+        classes=classes,
+        ann_file=data_root + 'annotations/person_keypoints_val2017.json',
+        img_prefix=data_root + 'val2017/',
+        pipeline=test_pipeline),
+    test=dict(
+        type=dataset_type,
+        classes=classes,
+        ann_file=data_root + 'annotations/person_keypoints_val2017.json',
+        img_prefix=data_root + 'val2017/',
+        pipeline=test_pipeline))
 # optimizer
 optimizer = dict(type='SGD', lr=0.02, momentum=0.9, weight_decay=0.0004,
                  paramwise_cfg=dict(bias_lr_mult=2., bias_decay_mult=0.))
@@ -93,9 +116,9 @@ optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 lr_config = dict(
     policy='step',
     warmup='linear',
-    warmup_iters=500,
+    warmup_iters=500,  # TOCHECK: centerpose
     warmup_ratio=1.0 / 5,
-    step=[85, 115])
+    step=[270, 300])
 checkpoint_config = dict(interval=1)
 # runtime settings
-total_epochs = 140
+total_epochs = 320

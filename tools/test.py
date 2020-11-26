@@ -83,7 +83,7 @@ def parse_args():
         help='job launcher')
     parser.add_argument(
         '--ckpt-module',
-        choices=['mmcv', 'fcos', 'embedmask', 'simplepose', 'ttfnet', 'centernet'],
+        choices=['mmcv', 'fcos', 'embedmask', 'simplepose', 'ttfnet', 'centernet', 'centerpose'],
         default='mmcv',
         help='name of converter')
     parser.add_argument('--local_rank', type=int, default=0)

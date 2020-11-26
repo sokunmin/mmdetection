@@ -9,11 +9,11 @@ import numpy as np
 import math
 from mmdet.core import multi_apply, calc_region
 from ..builder import HEADS, build_loss
-# from ..utils.center_ops import gather_feature, transpose_and_gather_feat, topk, topk_channel
 from .corner_head import CornerHead
 from ..utils import gaussian_radius, gen_gaussian_target
 
 # TOCHECK:
+#  0. init_weights() & keypint_topk()
 #  1. SmoothL1Loss vs. L1Loss
 #  2. GaussianFocalLoss vs. CenterFocalLoss
 #  3. FocalL2Loss vs. GaussianFocalLoss vs. L1Loss
@@ -25,28 +25,22 @@ class CenterHead(CornerHead):
 
     def __init__(self,
                  *args,
+                 feat_channels=256,
                  max_objs=128,
-                 dcn_cfg=dict(
-                     in_channels=(512, 256, 128, 64),
-                     kernels=(4, 4, 4),
-                     strides=(2, 2, 2),
-                     paddings=(1, 1, 1),
-                     out_paddings=(0, 0, 0)
-                 ),
+                 upsample_cfg=None,
                  loss_bbox=dict(type='L1Loss', loss_weight=0.1),
                  **kwargs):
         self.max_objs = max_objs
-        self.dcn_cfg = dcn_cfg
+        self.feat_channels = feat_channels
+        self.upsample_cfg = upsample_cfg
+        self.with_upsample = upsample_cfg is not None
         super(CenterHead, self).__init__(*args, **kwargs)
         self.loss_bbox = build_loss(loss_bbox)
+        self.loss_embedding = None
         self.fp16_enabled = False
-        self.limbs = [[0, 1], [0, 2], [1, 3], [2, 4],
-                      [3, 5], [4, 6], [5, 6],
-                      [5, 7], [7, 9], [6, 8], [8, 10],
-                      [5, 11], [6, 12], [11, 12],
-                      [11, 13], [13, 15], [12, 14], [14, 16]]
 
     def build_upsample(self, in_channels, kernels, strides, paddings, out_paddings):
+        assert self.upsample_cfg.type == 'DCNv2'
         upsamples = []
         for i in range(len(in_channels) - 1):
             upsamples.append(UpsampleDeconv(
@@ -61,28 +55,29 @@ class CenterHead(CornerHead):
 
     def build_head(self, out_channel):
         head_convs = [ConvModule(
-            self.in_channels, self.in_channels, 3,
+            self.in_channels, self.feat_channels, 3,
             padding=1, bias=True, act_cfg=dict(type='ReLU', inplace=True))]
         for i in range(1, self.num_feat_levels):
             head_convs.append(ConvModule(
-                self.in_channels, self.in_channels, 3,
+                self.feat_channels, self.feat_channels, 3,
                 padding=1, bias=True, act_cfg=dict(type='ReLU', inplace=True)))
 
-        head_convs.append(nn.Conv2d(self.in_channels, out_channel, 1))
+        head_convs.append(nn.Conv2d(self.feat_channels, out_channel, 1))
         return nn.Sequential(*head_convs)
 
     def _init_layers(self):
         # > upsample
-        self.upsamples = self.build_upsample(self.dcn_cfg.in_channels,
-                                             self.dcn_cfg.kernels,
-                                             self.dcn_cfg.strides,
-                                             self.dcn_cfg.paddings,
-                                             self.dcn_cfg.out_paddings)
+        if self.with_upsample:
+            self.upsamples = self.build_upsample(self.upsample_cfg.in_channels,
+                                                 self.upsample_cfg.kernels,
+                                                 self.upsample_cfg.strides,
+                                                 self.upsample_cfg.paddings,
+                                                 self.upsample_cfg.out_paddings)
 
         # > ct heads
         self.ct_hm_head = self.build_head(self.num_classes)
-        self.bbox_wh_head = self.build_head(2)
-        self.bbox_reg_head = self.build_head(2)
+        self.ct_reg_head = self.build_head(2)
+        self.ct_wh_head = self.build_head(2)
 
     def init_weights(self):
         # TOCHECK: cmp w/ centerpose/ttfnet
@@ -92,8 +87,8 @@ class CenterHead(CornerHead):
         bias_cls = bias_init_with_prob(0.1)
         normal_init(self.ct_hm_head[-1], std=0.01, bias=bias_cls)
 
-        self._init_head_weights(self.bbox_wh_head)
-        self._init_head_weights(self.bbox_reg_head)
+        self._init_head_weights(self.ct_wh_head)
+        self._init_head_weights(self.ct_reg_head)
 
     def _init_head_weights(self, layer):
         for _, m in layer.named_modules():
@@ -109,19 +104,21 @@ class CenterHead(CornerHead):
             wh: tensor, (batch, 4, h, w) or (batch, 80 * 4, h, w).
         """
         x = feats[-1]  # (B, 512, H, W)
-        x = self.upsamples(x)  # (B, 64, H, W)
-        ct_cls = self.ct_hm_head(x)  # > (B, #cls, 128, 128)
-        ct_wh = self.bbox_wh_head(x)  # > (B, 2, 128, 128)
-        ct_offset = self.bbox_reg_head(x)  # > (B, 2, 128, 128)
-        return ct_cls, ct_offset, ct_wh
+        if self.with_upsample:
+            x = self.upsamples(x)  # (B, 64, H, W)
+        ct_hm = self.ct_hm_head(x)  # > (B, #cls, 128, 128)
+        ct_offset = self.ct_reg_head(x)  # > (B, 2, 128, 128)
+        ct_wh = self.ct_wh_head(x)  # > (B, 2, 128, 128)
+        return ct_hm, ct_offset, ct_wh
 
     def get_bboxes(self,
-                   pred_ct_cls,
-                   pred_ct_offset,
-                   pred_ct_wh,
+                   # > SingleStageDetector  # > DEBUG
+                   # pred_ct_cls, pred_ct_offset, pred_ct_wh,
+                   # > SingleStageMultiDetector
+                   bbox_outs,
                    img_metas,
                    rescale=False):
-
+        pred_ct_cls, pred_ct_offset, pred_ct_wh = bbox_outs
         batch, cls, feat_h, feat_w = pred_ct_cls.size()
         # `ct`: #cls, `ct_offset`: 2, `ct_wh`: 2
         ct_cls = pred_ct_cls.detach().sigmoid_()  # > (#cls, H, W)
@@ -136,11 +133,11 @@ class CenterHead(CornerHead):
         if ct_offset is not None:
             ct_offset = self._transpose_and_gather_feat(ct_offset, ct_inds)  # (B, 2, H, W) -> (B, K, 2)
             ct_offset = ct_offset.view(batch, num_topk, 2)
-            ct_xs = ct_xs.view(batch, num_topk, 1) + ct_offset[:, :, 0:1]
-            ct_ys = ct_ys.view(batch, num_topk, 1) + ct_offset[:, :, 1:2]
+            refined_ct_xs = ct_xs.view(batch, num_topk, 1) + ct_offset[:, :, 0:1]
+            refined_ct_ys = ct_ys.view(batch, num_topk, 1) + ct_offset[:, :, 1:2]
         else:
-            ct_xs = ct_xs.view(batch, num_topk, 1) + 0.5
-            ct_ys = ct_ys.view(batch, num_topk, 1) + 0.5
+            refined_ct_xs = ct_xs.view(batch, num_topk, 1) + 0.5
+            refined_ct_ys = ct_ys.view(batch, num_topk, 1) + 0.5
 
         ct_wh = self._transpose_and_gather_feat(ct_wh, ct_inds)  # (B, 2, H, W) -> (B, K, 2)
         ct_wh = ct_wh.view(batch, num_topk, 2)  # (B, K, 2)
@@ -151,12 +148,10 @@ class CenterHead(CornerHead):
 
         # > `bboxes`: (B, topk, 4)
         half_w, half_h = ct_wh[..., 0:1] / 2, ct_wh[..., 1:2] / 2
-        bboxes = torch.cat([ct_xs - half_w, ct_ys - half_h,
-                            ct_xs + half_w, ct_ys + half_h],
+        bboxes = torch.cat([refined_ct_xs - half_w, refined_ct_ys - half_h,
+                            refined_ct_xs + half_w, refined_ct_ys + half_h],
                            dim=2)  # (B, K, 4)
-        # feat_bboxes = bboxes.clone()
-        # bboxes[..., 0::2] = bboxes[..., 0::2] / width_ratio
-        # bboxes[..., 1::2] = bboxes[..., 1::2] / height_ratio
+        feat_bboxes = bboxes.clone()
         result_list = []
         for img_id in range(len(img_metas)):  # > #img
             result_list.append(self.get_bboxes_single(
@@ -167,7 +162,7 @@ class CenterHead(CornerHead):
                 (feat_h, feat_w),
                 rescale
             ))
-        return result_list
+        return result_list, (scores, feat_bboxes, ct_inds, ct_xs, ct_ys)  # > DEBUG
 
     def get_bboxes_single(self,
                           bboxes,
@@ -180,7 +175,6 @@ class CenterHead(CornerHead):
         pad_h, pad_w = img_meta['pad_shape'][:2]
         width_ratio = float(feat_size[1] / pad_w)
         height_ratio = float(feat_size[0] / pad_h)
-        feat_bboxes = bboxes.clone()
         bboxes[:, 0::2] = (bboxes[:, 0::2] / width_ratio).clamp(min=0, max=pad_w - 1)
         bboxes[:, 1::2] = (bboxes[:, 1::2] / height_ratio).clamp(min=0, max=pad_h - 1)
         if rescale:
@@ -188,14 +182,22 @@ class CenterHead(CornerHead):
             bboxes /= bboxes.new_tensor(scale_factor)
         bboxes = torch.cat([bboxes, scores], dim=1)  # (K, 4 + 1)
         labels = labels.squeeze(-1)  # (K, 1) -> (K,)
-        # TOCHECK: remove `feat_bboxes`
-        return bboxes, labels#, feat_bboxes
+        return bboxes, labels
+
+    def postprocess(self, head_outs, bbox_list, is_train=False):
+        if is_train:
+            # TOCHECK: need to modify?
+            pass
+        else:
+            new_bbox_list, bbox_metas = bbox_list
+            head_outs['bbox'] = head_outs['bbox'] + bbox_metas
+        return head_outs, new_bbox_list
 
     @force_fp32(apply_to=('pred_heatmap', 'pred_reg', 'pred_wh'))
     def loss(self,
              pred_heatmap,  # (B, #cls, H, W)
-             pred_wh,  # (B, 2, H, W)
              pred_reg,  # (B, 2, H, W)
+             pred_wh,  # (B, 2, H, W)
              gt_bboxes,  # (B, #obj, 4)
              gt_labels,  # (B, #obj)
              img_metas,
@@ -203,10 +205,14 @@ class CenterHead(CornerHead):
         img_shape = img_metas[0]['pad_shape'][:2]
         feat_shape = tuple(pred_heatmap.size()[2:])
         all_targets = self.get_all_targets(gt_bboxes, gt_labels, img_shape, feat_shape)  # heatmap, box_target, reg_weight
-        loss_cls, loss_wh, loss_reg = self.loss_calc(pred_heatmap, pred_wh, pred_reg, *all_targets)
-        return {'loss_heatmap': loss_cls, 'loss_wh': loss_wh, 'loss_reg': loss_reg}
+        loss_cls, loss_reg, loss_wh = self.loss_calc(pred_heatmap, pred_reg, pred_wh, *all_targets)
+        return {'loss_heatmap': loss_cls, 'loss_reg': loss_reg, 'loss_wh': loss_wh}
 
-    def target_single_image(self, gt_boxes, gt_labels, img_shape, feat_shape):
+    def target_single_image(self,
+                            gt_boxes,
+                            gt_labels,
+                            img_shape,
+                            feat_shape):
         """
 
         Args:
@@ -226,8 +232,8 @@ class CenterHead(CornerHead):
         num_objs = gt_boxes.size(0)
         # `H/W`: 128
         gt_heatmap = gt_boxes.new_zeros(self.num_classes, feat_h, feat_w)  # > (#cls, H, W)
-        gt_wh = gt_boxes.new_zeros(self.max_objs, 2)  # > (#max_obj, 2)
         gt_reg = gt_boxes.new_zeros(self.max_objs, 2)  # > (#max_obj, 2)
+        gt_wh = gt_boxes.new_zeros(self.max_objs, 2)  # > (#max_obj, 2)
         gt_inds = gt_boxes.new_zeros(self.max_objs)  # > (#max_obj,)
         gt_mask = gt_boxes.new_zeros(self.max_objs)  # > (#max_obj,)
 
@@ -256,7 +262,7 @@ class CenterHead(CornerHead):
             gt_heatmap[cls_ind] = gen_gaussian_target(heatmap=gt_heatmap[cls_ind],
                                                       center=feat_gt_centers_int[box_id],
                                                       radius=radius)
-        return gt_heatmap, gt_wh, gt_reg, gt_inds, gt_mask
+        return gt_heatmap, gt_reg, gt_wh, gt_inds, gt_mask
 
     def get_all_targets(self,
                         gt_boxes,
@@ -276,7 +282,7 @@ class CenterHead(CornerHead):
         """
         with torch.no_grad():
             # `heatmap`: (B, #cls, H, W), `wh_target`: (B, 2, H, W), `reg_target`: (B, 2, H, W)
-            heatmap, wh_target, reg_target, ind_target, target_mask = multi_apply(
+            heatmap, reg_target, wh_target, ind_target, target_mask = multi_apply(
                 self.target_single_image,
                 gt_boxes,  # (B, #obj, 4)
                 gt_labels,  # (B, #obj)
@@ -284,21 +290,21 @@ class CenterHead(CornerHead):
                 feat_shape=feat_shape  # (H, W)
             )
             heatmap = torch.stack(heatmap, dim=0)
-            wh_target = torch.stack(wh_target, dim=0)
             reg_target = torch.stack(reg_target, dim=0)
+            wh_target = torch.stack(wh_target, dim=0)
             ind_target = torch.stack(ind_target, dim=0).to(torch.long)
             target_mask = torch.stack(target_mask, dim=0)
             # heatmap, wh_target = [torch.stack(t, dim=0).detach() for t in [heatmap, wh_target]]
             # reg_target = torch.stack(reg_target, dim=0).detach()
-            return heatmap, wh_target, reg_target, ind_target, target_mask
+            return heatmap, reg_target, wh_target, ind_target, target_mask
 
     def loss_calc(self,
                   pred_hm,
                   pred_reg,
                   pred_wh,
                   heatmap_target,
-                  wh_target,
                   reg_target,
+                  wh_target,
                   ind_target,
                   target_mask):
         """
@@ -320,7 +326,7 @@ class CenterHead(CornerHead):
         pred_hm = torch.clamp(pred_hm.sigmoid_(), min=eps, max=1 - eps)
         num_pos = heatmap_target.eq(1).float().sum()
         # > class loss
-        loss_cls = self.loss_cls(pred_hm, heatmap_target, avg_factor=1 if num_pos == 0 else num_pos)
+        loss_cls = self.loss_heatmap(pred_hm, heatmap_target, avg_factor=1 if num_pos == 0 else num_pos)
         target_mask = target_mask.unsqueeze(2)
 
         # > width/height loss
@@ -336,39 +342,46 @@ class CenterHead(CornerHead):
         loss_reg = self.loss_offset(pred_reg * reg_mask,
                                     reg_target * reg_mask,
                                     avg_factor=reg_mask.sum() + 1e-4)
-        return loss_cls, loss_wh, loss_reg
+        return loss_cls, loss_reg, loss_wh
 
 
-# @HEADS.register_module()
+@HEADS.register_module()
 class CenterPoseHead(CornerHead):
 
     def __init__(self,
                  *args,
-                 in_channels=256,
-                 loss_pose=None,
+                 feat_channels=256,
+                 upsample_cfg=None,
+                 loss_joint=None,
                  **kwargs):
+        self.feat_channels = feat_channels
+        self.upsample_cfg = upsample_cfg
         super(CenterPoseHead, self).__init__(*args, **kwargs)
-        self.loss_pose = build_loss(loss_pose)
-        self.in_channels = in_channels
-        self._init_layers()
+        self.loss_joint = build_loss(loss_joint)
+        self.loss_embedding = None
         self.fp16_enabled = False
+        self.limbs = [[0, 1], [0, 2], [1, 3], [2, 4],
+                      [3, 5], [4, 6], [5, 6],
+                      [5, 7], [7, 9], [6, 8], [8, 10],
+                      [5, 11], [6, 12], [11, 12],
+                      [11, 13], [13, 15], [12, 14], [14, 16]]
 
     def build_head(self, out_channel):
         head_convs = [ConvModule(
-            self.in_channels, self.in_channels, 3,
+            self.in_channels, self.feat_channels, 3,
             padding=1, bias=True, act_cfg=dict(type='ReLU', inplace=True))]
         for i in range(1, self.num_feat_levels):
             head_convs.append(ConvModule(
-                self.in_channels, self.in_channels, 3,
+                self.feat_channels, self.feat_channels, 3,
                 padding=1, bias=True, act_cfg=dict(type='ReLU', inplace=True)))
 
-        head_convs.append(nn.Conv2d(self.in_channels, out_channel, 1))
+        head_convs.append(nn.Conv2d(self.feat_channels, out_channel, 1))
         return nn.Sequential(*head_convs)
 
     def _init_layers(self):
-        self.ct_kp_reg_head = self.build_head(self.num_classes * 2)
         self.kp_hm_head = self.build_head(self.num_classes)
         self.kp_reg_head = self.build_head(2)
+        self.ct_kp_reg_head = self.build_head(self.num_classes * 2)
 
     def init_weights(self):
         bias_cls = bias_init_with_prob(0.1)
@@ -384,51 +397,44 @@ class CenterPoseHead(CornerHead):
 
     def forward(self, feats):
         x = feats[-1]  # (64, H, W)
-        ct_kp_reg = self.ct_kp_reg_head(x)
         kp_hm = self.kp_hm_head(x)
         kp_reg = self.kp_reg_head(x)
-        return ct_kp_reg, kp_hm, kp_reg
+        ct_kp_reg = self.ct_kp_reg_head(x)
+        return kp_hm, kp_reg, ct_kp_reg
 
     def get_keypoints(self,
-                      pred_ct_kp,
-                      pred_kp_hm,
-                      pred_kp_ct_reg,
-                      pred_bbox_scores,
-                      pred_ct_xs,
-                      pred_ct_ys,
-                      pred_ct_inds,
-                      feat_bboxes,
+                      bbox_outs,
+                      keypoint_outs,
                       img_metas,
                       rescale=False):
+        # > TOCHECK: why `rescale` is `True`
+        pred_ct_hm, pred_ct_reg, pred_ct_wh, \
+        bbox_scores, feat_bboxes, ct_inds, ct_xs, ct_ys = bbox_outs
+        pred_kp_hm, pred_kp_reg, pred_ct_kp_reg = keypoint_outs
         batch, _, feat_h, feat_w = pred_kp_hm.size()
         num_topk = self.test_cfg.max_per_img
         num_joints = self.num_classes
-        # pad_h, pad_w = img_metas[0]['pad_shape'][:2]
-        batch, cls, feat_h, feat_w = pred_ct_kp.size()
-        # width_ratio = float(feat_w / pad_w)
-        # height_ratio = float(feat_h / pad_h)
-        # batch, _, height, width = pred_ct_kp.size()
-        ct2kp_offset = pred_ct_kp.detach()  # > (B, #kp x 2, H, W)
         kp_hm = pred_kp_hm.detach().sigmoid_()  # > (B, #kp, H, W)
-        kp_offset = pred_kp_ct_reg.detach()  # > (B, 2, H, W)
+        kp_offset = pred_kp_reg.detach()  # > (B, 2, H, W)
+        ct2kp_offset = pred_ct_kp_reg.detach()  # > (B, #kp x 2, H, W)
 
         # > offsets of center to keypoints
-        ct2kp_offset = self._transpose_and_gather_feat(ct2kp_offset, pred_ct_inds)
+        ct2kp_offset = self._transpose_and_gather_feat(ct2kp_offset, ct_inds)
         ct2kp_offset = ct2kp_offset.view(batch, num_topk, num_joints * 2)
-        ct2kp_offset[..., ::2] += pred_ct_xs.view(batch, num_topk, 1).expand(batch, num_topk, num_joints)
-        ct2kp_offset[..., 1::2] += pred_ct_ys.view(batch, num_topk, 1).expand(batch, num_topk, num_joints)
+        ct2kp_offset[..., 0::2] += ct_xs.view(batch, num_topk, 1).expand(batch, num_topk, num_joints)
+        ct2kp_offset[..., 1::2] += ct_ys.view(batch, num_topk, 1).expand(batch, num_topk, num_joints)
         ct2kp_offset = ct2kp_offset.view(batch, num_topk, num_joints, 2).permute(0, 2, 1, 3).contiguous()
         ct_det_kps = ct2kp_offset.unsqueeze(3).expand(batch, num_joints, num_topk, num_topk, 2)
 
-        # > keypoint heatmaps, TOCHECK: remove `self._topk`
-        kp_hm = self._local_maximum(kp_hm, kernel=3)
-        kp_scores, kp_inds, kp_ys, kp_xs = self._topk(kp_hm, k=num_topk)
+        # > keypoint heatmaps
+        kp_hm = self._local_maximum(kp_hm, kernel=3)  # TOCHECK: remove `self._topk`
+        kp_scores, kp_inds, kp_ys, kp_xs = self._kepoint_topk(kp_hm, k=num_topk)
 
         # > keypoint regressed locations
         kp_offset = self._transpose_and_gather_feat(kp_offset, kp_inds.view(batch, -1))
         kp_offset = kp_offset.view(batch, num_joints, num_topk, 2)
-        kp_xs = kp_xs + kp_offset[..., 0]
-        kp_ys = kp_ys + kp_offset[..., 1]
+        kp_xs += kp_offset[..., 0]
+        kp_ys += kp_offset[..., 1]
 
         # > keep positives
         mask = (kp_scores > self.test_cfg.kp_score_thr).float()
@@ -470,7 +476,7 @@ class CenterPoseHead(CornerHead):
             result_list.append(self.get_keypoints_single(
                 kps[img_id],
                 kp_scores[img_id],
-                pred_bbox_scores[img_id],
+                bbox_scores[img_id],
                 img_metas[img_id],
                 (feat_h, feat_w),
                 rescale=rescale
@@ -492,7 +498,7 @@ class CenterPoseHead(CornerHead):
         keypoints[..., 0] /= width_ratio
         keypoints[..., 1] /= height_ratio
         if rescale:
-            scale_factor = img_meta['scale_factor']
+            scale_factor = img_meta['scale_factor'][:2]
             keypoints /= keypoints.new_tensor(scale_factor)
         scores = (scores > self.test_cfg.kp_score_thr).int().unsqueeze(-1)
 
@@ -501,7 +507,7 @@ class CenterPoseHead(CornerHead):
         # TOCHECK: add concat() to (K, 56) for softnms39().
         return keypoints
 
-    def _topk(self, scores, k=20):
+    def _kepoint_topk(self, scores, k=20):
         # TOCHECK: use `CornerHead._topk()`
         batch, cls, height, width = scores.size()
         # `scores`: (B, #cls, H, W) -> (B, #cls, HxW) -> (B, #cls, K)
@@ -512,6 +518,21 @@ class CenterPoseHead(CornerHead):
         topk_xs = (topk_inds % width).float()  # (B, #cls, topk)
 
         return topk_scores, topk_inds, topk_ys, topk_xs
+
+    @force_fp32(apply_to=('pred_ct_kp', 'pred_kp_hm', 'pred_kp_reg'))
+    def loss(self,
+             pred_kp_hm,  # (B, #joints, H, W)
+             pred_kp_reg,  # (B, 2, H, W)
+             pred_ct_kp,  # (B, #joints x 2, H, W)
+             gt_bboxes,  # (B, #obj, 4)
+             gt_labels,  # (B, #obj)
+             img_metas,
+             gt_bboxes_ignore=None):
+        img_shape = img_metas[0]['pad_shape'][:2]
+        feat_shape = tuple(pred_kp_hm.size()[2:])
+        all_targets = self.get_all_targets(gt_bboxes, gt_labels, img_shape, feat_shape)  # heatmap, box_target, reg_weight
+        loss_kp_heatmap, loss_kp_reg, loss_ct_kp_reg = self.loss_calc(pred_kp_hm, pred_kp_reg, pred_ct_kp, *all_targets)
+        return {'loss_kp_heatmap': loss_kp_heatmap, 'loss_kp_reg': loss_kp_reg, 'loss_ct_kp_reg': loss_ct_kp_reg}
 
 
 class UpsampleDeconv(nn.Module):

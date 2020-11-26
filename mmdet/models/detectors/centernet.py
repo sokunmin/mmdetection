@@ -6,9 +6,10 @@ import seaborn as sns
 from mmcv import color_val, imshow
 from mmcv.image import imread, imwrite
 import numpy as np
-from mmdet.core import bbox2result, keypoint2result, bbox_mapping_back
+from mmdet.core import bbox2result, bbox_mapping_back
 from ..builder import DETECTORS
 from .single_stage import SingleStageDetector
+from .single_stage_mt import SingleStageMultiDetector
 
 try:
     import matplotlib
@@ -21,19 +22,24 @@ except ImportError:
 
 
 @DETECTORS.register_module()
-class CenterNet(SingleStageDetector):
+class CenterNet(SingleStageMultiDetector):
 
     def __init__(self,
                  backbone,
                  neck=None,
                  bbox_head=None,
-                 pose_head=None,
+                 mask_head=None,
+                 keypoint_head=None,
                  train_cfg=None,
                  test_cfg=None,
-                 pretrained=None):
-        super(CenterNet, self).__init__(backbone, neck, bbox_head, train_cfg,
-                                        test_cfg, pretrained)
-        self.pose_head = pose_head
+                 pretrained=None,
+                 loss_balance=None):
+        # > SingleStageDetector  # > DEBUG
+        # super(CenterNet, self).__init__(backbone, neck, bbox_head,
+        #                                 train_cfg, test_cfg, pretrained)
+        # > SingleStageMultiDetector
+        super(CenterNet, self).__init__(backbone, neck, bbox_head, mask_head, keypoint_head,
+                                        train_cfg, test_cfg, pretrained, loss_balance)
 
     def merge_aug_results(self, aug_results, img_metas):
         """Merge augmented detection bboxes and score.
@@ -106,34 +112,6 @@ class CenterNet(SingleStageDetector):
 
         return [bbox_results]
 
-    # def simple_test(self, img, img_metas, rescale=False):
-    #     x = self.extract_feat(img)
-    #     outs = self.bbox_head(x)
-    #     # TODO: split to `get_bboxes()`, `get_keypoints()`
-    #     bbox_list, keypoint_list = self.bbox_head.get_bboxes(
-    #         *outs, img_metas, rescale=rescale)
-    #
-    #     # TODO: add `get_keypoints()`
-    #
-    #     # TODO: add `group_predicts()`
-    #
-    #     # skip post-processing when exporting to ONNX
-    #     if torch.onnx.is_in_onnx_export():
-    #         return bbox_list
-    #
-    #     bbox_results = [
-    #         bbox2result(det_bboxes, det_labels, self.bbox_head.num_classes)
-    #         for det_bboxes, det_labels in bbox_list
-    #     ]
-    #
-    #     keypoint_results = [
-    #         keypoint2result(det_keypoints, self.bbox_head.num_keypoints)
-    #         for det_keypoints in keypoint_list
-    #     ]
-    #     # TODO: add `soft_nms39()`
-    #     # return list(zip(bbox_results[0], keypoint_results[0]))
-    #     return list(zip(bbox_results, keypoint_results))
-
     def show_result(self,
                     img,
                     result,
@@ -149,11 +127,13 @@ class CenterNet(SingleStageDetector):
 
         img = mmcv.imread(img)
         img = img.copy()
-        if isinstance(result, tuple):
-            # TODO: use `self.with_bbox`, `self.with_pose`
-            if len(result) == 2:
+        if isinstance(result, tuple) and len(result) > 1:  # > multi-task
+            if self.with_bbox and self.with_keypoint and not self.with_mask:
                 bbox_result, keypoint_result = result
                 segm_result = None
+            elif self.with_bbox and self.with_mask and not self.with_keypoint:
+                bbox_result, segm_result = result
+                keypoint_result = None
             else:
                 bbox_result, keypoint_result, segm_result = result
         else:
@@ -189,11 +169,11 @@ class CenterNet(SingleStageDetector):
                 img[mask] = img[mask] * 0.5 + color_mask * 0.5
 
         if keypoint_result is not None:
-            num_joints = self.bbox_head.num_keypoints
+            num_joints = self.keypoint_head.num_classes
             keypoints = np.vstack(keypoint_result)  # (B, K, ((xyv) * #kp + bbox_score)
             kp_shape = keypoints.shape
             joints = keypoints[bbox_keep, :-1].reshape(num_objs, kp_shape[1] // 3, 3).astype(dtype=np.int32)
-            limbs = self.bbox_head.limbs
+            limbs = self.keypoint_head.limbs
             for i, joint in zip(range(num_objs), joints):  # > #objs
                 color = colors[i % num_colors]
                 for l, limb_ind in enumerate(limbs):  # `limbs`: (#kp, 2)

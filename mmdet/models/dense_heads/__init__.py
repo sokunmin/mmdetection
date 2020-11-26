@@ -1,8 +1,7 @@
 from .anchor_free_head import AnchorFreeHead
 from .anchor_head import AnchorHead
 from .atss_head import ATSSHead
-from .center_head import CenterHead
-from .centerpose_head import CenterPoseHead
+from .center_head import CenterHead, CenterPoseHead
 from .centripetal_head import CentripetalHead
 from .corner_head import CornerHead
 from .fcos_head import FCOSHead

@@ -556,7 +556,7 @@ class Normalize(object):
             results[key] = mmcv.imnormalize(results[key], self.mean, self.std,
                                             self.to_rgb)
         results['img_norm_cfg'] = dict(
-            mean=self.mean, std=self.std, to_rgb=self.to_rgb)
+            mean=self.mean, std=self.std, to_rgb=self.to_rgb, norm_rgb=self.norm_rgb)
         return results
 
     def __repr__(self):
@@ -1693,7 +1693,7 @@ class RandomLighting(object):
 
     def __call__(self, results):
         weights = np.random.normal(scale=self.scale, size=3)
-        jitter = self.eigen_vecs.dot(weights * self.eigen_vals)
+        jitter = self.eigen_vectors.dot(weights * self.eigen_values)
         img = results['img']
         if img.dtype == np.uint8:
             img = img.astype(np.float32)
@@ -1701,6 +1701,8 @@ class RandomLighting(object):
             img = np.clip(img, 0, 255).astype(np.uint8)
         else:
             img = jitter + img
+            img = img.astype(np.float32)
+
         results['img'] = img
         return results
 
