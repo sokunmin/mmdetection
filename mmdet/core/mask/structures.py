@@ -317,6 +317,23 @@ class BitmapMasks(BaseInstanceMasks):
             cropped_masks = self.masks[:, y1:y1 + h, x1:x1 + w]
         return BitmapMasks(cropped_masks, h, w)
 
+    def crop_and_paste(self, bbox, border, pad_shape):
+        assert isinstance(bbox, np.ndarray)
+        assert bbox.ndim == 1
+
+        # clip the boundary
+        bbox = bbox.copy()
+        bbox[0::2] = np.clip(bbox[0::2], 0, self.width)
+        bbox[1::2] = np.clip(bbox[1::2], 0, self.height)
+
+        x1, y1, x2, y2 = bbox
+        b_y1, b_y2, b_x1, b_x2 = border.astype(np.int32)
+        pad_h, pad_w = pad_shape
+        cropped_masks = np.zeros(
+            (len(self.masks), pad_h, pad_w), dtype=np.uint8)
+        cropped_masks[:, b_y1:b_y2, b_x1:b_x2] = self.masks[:, y1:y2, x1:x2]
+        return BitmapMasks(cropped_masks, pad_h, pad_w)
+
     def crop_and_resize(self,
                         bboxes,
                         out_shape,

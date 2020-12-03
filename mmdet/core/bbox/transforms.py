@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import cv2
 
 
 def bbox_flip(bboxes, img_shape, direction='horizontal'):
@@ -206,3 +207,31 @@ def bbox_rescale(bboxes, scale_factor=1.0):
     else:
         rescaled_bboxes = torch.stack([x1, y1, x2, y2], dim=-1)
     return rescaled_bboxes
+
+
+def mask2polybox(mask, cnt_epsilon=0.003):
+    thres_mask = mask * 255
+    ret, thresh = cv2.threshold(thres_mask, 127, 255, cv2.THRESH_BINARY)
+    contours, hierarchy = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    polygons = []
+    for cnt in contours:
+        epsilon = cnt_epsilon * cv2.arcLength(cnt, True)
+        mask_poly = cv2.approxPolyDP(cnt, epsilon, True)
+        mask_poly = np.reshape(mask_poly, (mask_poly.shape[0], -1))
+        if np.sum(mask_poly) == 0:
+            print('> [mask2bbox()] Error', mask_poly)
+
+        polygons.append(mask_poly)
+
+    if len(polygons) == 0:
+        return None, None
+
+    # compute bbox
+    box_poly = np.concatenate(polygons, axis=0)
+    min_x, min_y = box_poly[:, 0].min(), box_poly[:, 1].min()
+    max_x, max_y = box_poly[:, 0].max(), box_poly[:, 1].max()
+    # [1] (x, y, w, h)
+    # bbox = np.array([min_x, min_y, max_x - min_x, max_y - min_y])
+    # [2] (x1, y1, x2, y2)
+    bbox = np.array([min_x, min_y, max_x - 1, max_y - 1], dtype=np.float32)
+    return polygons, bbox

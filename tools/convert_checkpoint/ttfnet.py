@@ -9,8 +9,8 @@ def load_checkpoint(model,
                     map_location=None,
                     strict=False,
                     logger=None,
-                    show_model_arch=False,
-                    print_keys=False):
+                    show_model_arch=True,
+                    print_keys=True):
     """ Note that official pre-trained models use `GroupNorm` in backbone.
       """
     if not osp.isfile(filename):

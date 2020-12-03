@@ -57,6 +57,11 @@ def load_checkpoint(model,
                 if 'dcnv2.' in new_k:
                     new_k = new_k.replace("dcnv2.", "")
             if 'head.' in new_k:
+                if 'bbox_head.upsamples' in new_k:
+                    if '.up_sample.' in new_k:
+                        new_k = new_k.replace(".up_sample.", ".upsample.")
+                    elif '.up_bn.' in new_k:
+                        new_k = new_k.replace(".up_bn.", ".upsample_bn.")
                 if 'head.cls_head.feat_conv' in new_k:
                     new_k = new_k.replace("head.cls_head.feat_conv", "bbox_head.ct_hm_head.0.conv")
                 if 'head.cls_head.out_conv' in new_k:

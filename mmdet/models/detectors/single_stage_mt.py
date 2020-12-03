@@ -44,7 +44,8 @@ class SingleStageMultiDetector(BaseDetector):
             self.keypoint_head = build_head(keypoint_head)
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
-        if loss_balance is not None:
+        self.with_balance_loss = loss_balance is not None
+        if self.with_balance_loss:
             self.loss_balance = build_loss(loss_balance)
         self.init_weights(pretrained=pretrained)
 
@@ -125,25 +126,56 @@ class SingleStageMultiDetector(BaseDetector):
             dict[str, Tensor]: A dictionary of loss components.
         """
         x = self.extract_feat(img)
-        all_outs = {}
-        if self.with_bbox:
-            x, all_outs = self.bbox_head.preprocess(x, all_outs)
-            all_outs['bbox'] = self.bbox_head(x)
-            all_outs = self.bbox_head.postprocess(all_outs, is_train=True)
-        if self.with_mask:
-            x, all_outs = self.mask_head.preprocess(x, all_outs)
-            all_outs['mask'] = self.mask_head(x)
-            all_outs = self.mask_head.postprocess(all_outs, is_train=True)
-        if self.with_keypoint:
-            x, all_outs = self.keypoint_head.preprocess(x, all_outs)
-            all_outs['keypoint'] = self.keypoint_head(x)
-            all_outs = self.keypoint_head.postprocess(all_outs, is_train=True)
-
+        feat_shapes = [tuple(lvl.size()[2:]) for lvl in x]
         gt_inputs = (gt_bboxes, gt_masks, gt_keypoints, gt_labels)
-        losses = self.loss(all_outs, gt_inputs, img_metas,
-                           gt_bboxes_ignore=gt_bboxes_ignore,
-                           gt_masks_ignore=gt_masks_ignore,
-                           gt_keypoints_ignore=gt_keypoints_ignore)
+        all_targets = dict(bbox=None, mask=None, keypoint=None)
+        all_target_metas = dict(bbox=None, mask=None, keypoint=None)
+        all_preds, all_losses = {}, {}
+        if self.with_bbox:
+            x, all_preds = self.bbox_head.preprocess(x, all_preds)
+            all_preds['bbox'] = self.bbox_head(x)
+            all_targets['bbox'], all_target_metas['bbox'] = self.bbox_head.get_targets(
+                gt_inputs, all_target_metas, feat_shapes, img_metas)
+            loss_inputs = self.bbox_head.postprocess(
+                all_preds['bbox'], all_targets, all_target_metas, img_metas, return_loss=True)
+            bbox_losses = self.bbox_head.loss(
+                *loss_inputs,
+                gt_bboxes_ignore=gt_bboxes_ignore,
+                gt_masks_ignore=gt_masks_ignore,
+                gt_keypoints_ignore=gt_keypoints_ignore)
+            all_losses.update(bbox_losses)
+        if self.with_mask:
+            x, all_preds = self.mask_head.preprocess(x, all_preds)
+            all_preds['mask'] = self.mask_head(x)
+            all_targets['mask'], all_target_metas['mask'] = self.mask_head.get_targets(
+                gt_inputs, all_target_metas, feat_shapes, img_metas)
+            loss_inputs = self.mask_head.postprocess(
+                all_preds['mask'], all_targets, all_target_metas, img_metas, return_loss=True)
+            mask_losses = self.mask_head.loss(
+                *loss_inputs,
+                gt_bboxes_ignore=gt_bboxes_ignore,
+                gt_masks_ignore=gt_masks_ignore,
+                gt_keypoints_ignore=gt_keypoints_ignore)
+            all_losses.update(mask_losses)
+        if self.with_keypoint:
+            x, all_preds = self.keypoint_head.preprocess(x, all_preds)
+            all_preds['keypoint'] = self.keypoint_head(x)
+            all_targets['keypoint'], all_target_metas['keypoint'] = self.keypoint_head.get_targets(
+                gt_inputs, all_target_metas, feat_shapes, img_metas)
+            loss_inputs = self.keypoint_head.postprocess(
+                all_preds['keypoint'], all_targets, all_target_metas, img_metas, return_loss=True)
+            keypoint_losses = self.keypoint_head.loss(
+                *loss_inputs,
+                gt_bboxes_ignore=gt_bboxes_ignore,
+                gt_masks_ignore=gt_masks_ignore,
+                gt_keypoints_ignore=gt_keypoints_ignore)
+            all_losses.update(keypoint_losses)
+        if self.with_balance_loss:
+            all_losses = self.group_losses(all_losses)
+            all_losses = self.loss_balance(*all_losses)
+        return all_losses
+
+    def group_losses(self, losses):
         return losses
 
     def simple_test(self, img, img_metas, rescale=False):
@@ -161,13 +193,13 @@ class SingleStageMultiDetector(BaseDetector):
                 corresponds to each class.
         """
         x = self.extract_feat(img)
-        all_outs, all_results = {}, {'bbox': [], 'mask': [], 'keypoint': []}
+        all_preds, all_results = {}, {'bbox': [], 'mask': [], 'keypoint': []}
         if self.with_bbox:
-            x, all_outs = self.bbox_head.preprocess(x, all_outs)
-            all_outs['bbox'] = self.bbox_head(x)
+            x, all_preds = self.bbox_head.preprocess(x, all_preds)
+            all_preds['bbox'] = self.bbox_head(x)
             # > (n, [bboxes, labels, ...])
-            bbox_list = self.bbox_head.get_bboxes(*all_outs.values(), img_metas, rescale=rescale)
-            all_outs, bbox_list = self.bbox_head.postprocess(all_outs, bbox_list)
+            bbox_list = self.bbox_head.get_bboxes(*all_preds.values(), img_metas, rescale=rescale)
+            all_preds, bbox_list = self.bbox_head.postprocess(all_preds, bbox_list)
             # skip post-processing when exporting to ONNX
             if not torch.onnx.is_in_onnx_export():
                 bbox_results = [
@@ -177,18 +209,18 @@ class SingleStageMultiDetector(BaseDetector):
                 ]
                 all_results['bbox'] = bbox_results
         if self.with_mask:
-            x, all_outs = self.mask_head.preprocess(x, all_outs)
-            all_outs['mask'] = self.mask_head(x)
-            mask_list = self.mask_head.get_masks(*all_outs.values(), img_metas, rescale=rescale)
-            all_outs, mask_list = self.mask_head.postprocess(all_outs, mask_list)
+            x, all_preds = self.mask_head.preprocess(x, all_preds)
+            all_preds['mask'] = self.mask_head(x)
+            mask_list = self.mask_head.get_masks(*all_preds.values(), img_metas, rescale=rescale)
+            all_preds, mask_list = self.mask_head.postprocess(all_preds, mask_list)
             if not torch.onnx.is_in_onnx_export():
                 # TOCHECK: add `mask2result`
                 all_results['mask'] = None
         if self.with_keypoint:
-            x, all_outs = self.keypoint_head.preprocess(x, all_outs)
-            all_outs['keypoint'] = self.keypoint_head(x)
-            keypoint_list = self.keypoint_head.get_keypoints(*all_outs.values(), img_metas, rescale=rescale)
-            all_outs, keypoint_list = self.keypoint_head.postprocess(all_outs, keypoint_list)
+            x, all_preds = self.keypoint_head.preprocess(x, all_preds)
+            all_preds['keypoint'] = self.keypoint_head(x)
+            keypoint_list = self.keypoint_head.get_keypoints(*all_preds.values(), img_metas, rescale=rescale)
+            all_preds, keypoint_list = self.keypoint_head.postprocess(all_preds, keypoint_list)
             if not torch.onnx.is_in_onnx_export():
                 keypoint_results = [
                     keypoint2result(keypoints, self.keypoint_head.num_classes)
@@ -226,50 +258,3 @@ class SingleStageMultiDetector(BaseDetector):
 
         feats = self.extract_feats(imgs)
         return [self.bbox_head.aug_test(feats, img_metas, rescale=rescale)]
-
-    def group_losses(self, losses):
-        return losses
-
-    def loss(self,
-             pred_outs,
-             gt_inputs,
-             img_metas,
-             gt_bboxes_ignore=None,
-             gt_masks_ignore=None,
-             gt_keypoints_ignore=None):
-        gt_bboxes, gt_masks, gt_keypoints, gt_labels = gt_inputs
-        all_losses = {}
-        if self.with_bbox:
-            loss_inputs = self.bbox_head.postprocess(
-                pred_outs['bbox'], gt_bboxes, gt_labels, img_metas,
-                self.train_cfg, return_loss=True)
-            bbox_losses = self.bbox_head.loss(
-                *loss_inputs,
-                gt_bboxes_ignore=gt_bboxes_ignore,
-                gt_masks_ignore=gt_masks_ignore,
-                gt_keypoints_ignore=gt_keypoints_ignore)
-            all_losses.update(bbox_losses)
-        if self.with_mask:
-            loss_inputs = self.mask_head.postprocess(
-                pred_outs['mask'], gt_masks, gt_labels, img_metas,
-                self.train_cfg, return_loss=True)
-            mask_losses = self.mask_head.loss(
-                *loss_inputs,
-                gt_bboxes_ignore=gt_bboxes_ignore,
-                gt_masks_ignore=gt_masks_ignore,
-                gt_keypoints_ignore=gt_keypoints_ignore)
-            all_losses.update(mask_losses)
-        if self.with_keypoint:
-            loss_inputs = self.keypoint_head.postprocess(
-                pred_outs['keypoint'], gt_keypoints, gt_labels, img_metas,
-                self.train_cfg, return_loss=True)
-            keypoint_losses = self.keypoint_head.loss(
-                *loss_inputs,
-                gt_bboxes_ignore=gt_bboxes_ignore,
-                gt_masks_ignore=gt_masks_ignore,
-                gt_keypoints_ignore=gt_keypoints_ignore)
-            all_losses.update(keypoint_losses)
-        if self.with_balance_loss:
-            all_losses = self.group_losses(all_losses)
-            all_losses = self.loss_balance(*all_losses)
-        return all_losses

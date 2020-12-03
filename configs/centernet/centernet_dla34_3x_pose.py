@@ -24,9 +24,7 @@ model = dict(
         num_feat_levels=1,
         corner_emb_channels=0,
         loss_heatmap=dict(
-            type='CenterFocalLoss',  # TOCHECK: cmp w/ `GaussianFocalLoss`
-            gamma=2.0,
-            loss_weight=1.0),
+            type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1),
         loss_offset=dict(type='L1Loss', loss_weight=1.0),
         loss_bbox=dict(type='L1Loss', loss_weight=0.1)),
     keypoint_head=dict(
@@ -36,9 +34,7 @@ model = dict(
         feat_channels=256,
         num_feat_levels=1,
         loss_heatmap=dict(
-            type='CenterFocalLoss',
-            gamma=2.0,
-            loss_weight=1.0),
+            type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1),
         loss_offset=dict(type='L1Loss', loss_weight=1.0),
         loss_joint=dict(type='L1Loss', loss_weight=1.0)))
 cudnn_benchmark = True
@@ -51,14 +47,14 @@ test_cfg = dict(
     score_thr=0.01,
     kp_score_thr=0.1,
     max_per_img=100)
-# dataset settings
+# dataset settings, SEE: Normalize RGB https://aishack.in/tutorials/normalized-rgb/
 img_norm_cfg = dict(
     mean=[0.408, 0.447, 0.470], std=[0.289, 0.274, 0.278], to_rgb=False, norm_rgb=True)
     # mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], to_rgb=False, norm_rgb=True)
     # mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=False, norm_rgb=True)
 train_pipeline = [
     dict(type='LoadImageFromFile', to_float32=True),
-    dict(type='LoadAnnotations', with_bbox=True),
+    dict(type='LoadAnnotations', with_bbox=True, with_keypoint=True),
     dict(type='Resize', img_scale=(512, 512), keep_ratio=False),
     dict(type='RandomFlip', flip_ratio=0.5),
     dict(type='Pad', size_divisor=32),
@@ -109,14 +105,14 @@ data = dict(
         img_prefix=data_root + 'val2017/',
         pipeline=test_pipeline))
 # optimizer
-optimizer = dict(type='SGD', lr=0.02, momentum=0.9, weight_decay=0.0004,
+optimizer = dict(type='SGD', lr=0.1, momentum=0.9, weight_decay=0.0004,
                  paramwise_cfg=dict(bias_lr_mult=2., bias_decay_mult=0.))
 optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 # learning policy
 lr_config = dict(
     policy='step',
     warmup='linear',
-    warmup_iters=500,  # TOCHECK: centerpose
+    warmup_iters=500,
     warmup_ratio=1.0 / 5,
     step=[270, 300])
 checkpoint_config = dict(interval=1)

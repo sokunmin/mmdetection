@@ -24,17 +24,16 @@ model = dict(
         num_feat_levels=1,
         corner_emb_channels=0,
         upsample_cfg=dict(
-            type='DCNv2',
+            type='deconv',
             in_channels=(512, 256, 128, 64),
-            kernels=(4, 4, 4),
-            strides=(2, 2, 2),
-            paddings=(1, 1, 1),
-            out_paddings=(0, 0, 0)
+            kernel_size=4,
+            stride=2,
+            padding=1,
+            output_padding=0,
+            bias=False
         ),
         loss_heatmap=dict(
-            type='CenterFocalLoss',  # TOCHECK: cmp w/ `GaussianFocalLoss`
-            gamma=2.0,
-            loss_weight=1.0),
+            type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1),
         loss_offset=dict(type='L1Loss', loss_weight=1.0),
         loss_bbox=dict(type='L1Loss', loss_weight=0.1)))
 cudnn_benchmark = True

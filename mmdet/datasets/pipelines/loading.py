@@ -217,12 +217,14 @@ class LoadAnnotations(object):
                  with_label=True,
                  with_mask=False,
                  with_seg=False,
+                 with_keypoint=False,
                  poly2mask=True,
                  file_client_args=dict(backend='disk')):
         self.with_bbox = with_bbox
         self.with_label = with_label
         self.with_mask = with_mask
         self.with_seg = with_seg
+        self.with_keypoint = with_keypoint
         self.poly2mask = poly2mask
         self.file_client_args = file_client_args.copy()
         self.file_client = None
@@ -350,6 +352,28 @@ class LoadAnnotations(object):
         results['seg_fields'].append('gt_semantic_seg')
         return results
 
+    def _load_keypoints(self, results):
+        """Private function to load keypoint annotations.
+
+        Args:
+            results (dict): Result dict from :obj:`dataset`.
+
+        Returns:
+            dict: The dict contains loaded keypoint annotations.
+        """
+        ann_info = results['ann_info']
+        results['gt_keypoints'] = ann_info['keypoints'].copy()
+
+        gt_keypoints_ignore = ann_info.get('keypoints_ignore', None)
+        if gt_keypoints_ignore is not None:
+            results['gt_keypoints_ignore'] = gt_keypoints_ignore.copy()
+            results['keypoint_fields'].append('gt_keypoints_ignore')
+        results['keypoint_fields'].append('gt_keypoints')
+        # flip_pairs must be assigned
+        assert 'flip_pairs' in ann_info
+        results['flip_pairs'] = ann_info['flip_pairs']
+        return results
+
     def __call__(self, results):
         """Call function to load multiple types annotations.
 
@@ -371,6 +395,8 @@ class LoadAnnotations(object):
             results = self._load_masks(results)
         if self.with_seg:
             results = self._load_semantic_seg(results)
+        if self.with_keypoint:
+            results = self._load_keypoints(results)
         return results
 
     def __repr__(self):
@@ -379,6 +405,7 @@ class LoadAnnotations(object):
         repr_str += f'with_label={self.with_label}, '
         repr_str += f'with_mask={self.with_mask}, '
         repr_str += f'with_seg={self.with_seg})'
+        repr_str += f'with_keypoint={self.with_keypoint})'
         repr_str += f'poly2mask={self.poly2mask})'
         repr_str += f'poly2mask={self.file_client_args})'
         return repr_str

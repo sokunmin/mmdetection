@@ -186,6 +186,7 @@ class DefaultFormatBundle(object):
     - gt_masks: (1)to tensor, (2)to DataContainer (cpu_only=True)
     - gt_semantic_seg: (1)unsqueeze dim-0 (2)to tensor, \
                        (3)to DataContainer (stack=True)
+    - gt_keypoints: (1) to tensor, (2)to DataContainer
     """
 
     def __call__(self, results):
@@ -216,6 +217,11 @@ class DefaultFormatBundle(object):
         if 'gt_semantic_seg' in results:
             results['gt_semantic_seg'] = DC(
                 to_tensor(results['gt_semantic_seg'][None, ...]), stack=True)
+        if 'gt_keypoints' in results:
+            for key in ['gt_keypoints', 'gt_keypoints_ignore']:
+                if key not in results:
+                    continue
+                results[key] = DC(to_tensor(results[key]))
         return results
 
     def _add_default_meta_keys(self, results):

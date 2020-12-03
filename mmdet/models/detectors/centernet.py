@@ -8,7 +8,6 @@ from mmcv.image import imread, imwrite
 import numpy as np
 from mmdet.core import bbox2result, bbox_mapping_back
 from ..builder import DETECTORS
-from .single_stage import SingleStageDetector
 from .single_stage_mt import SingleStageMultiDetector
 
 try:
@@ -34,10 +33,6 @@ class CenterNet(SingleStageMultiDetector):
                  test_cfg=None,
                  pretrained=None,
                  loss_balance=None):
-        # > SingleStageDetector  # > DEBUG
-        # super(CenterNet, self).__init__(backbone, neck, bbox_head,
-        #                                 train_cfg, test_cfg, pretrained)
-        # > SingleStageMultiDetector
         super(CenterNet, self).__init__(backbone, neck, bbox_head, mask_head, keypoint_head,
                                         train_cfg, test_cfg, pretrained, loss_balance)
 
@@ -116,8 +111,8 @@ class CenterNet(SingleStageMultiDetector):
                     img,
                     result,
                     score_thr=0.3,
-                    bbox_color='green',
-                    text_color='green',
+                    color_type='Paired',  # > 'hls, husl, Paired, Sets2
+                    num_colors=20,
                     thickness=1,
                     font_scale=0.5,
                     win_name='',
@@ -141,10 +136,7 @@ class CenterNet(SingleStageMultiDetector):
         bboxes = np.vstack(bbox_result)
         bbox_keep = bboxes[:, -1] > score_thr
         num_objs = bbox_keep.sum()
-        # colors = (np.array(sns.color_palette("hls", 8)) * 255).astype(np.uint16).tolist()  # 8
-        # colors = (np.array(sns.color_palette("husl", 18)) * 255).astype(np.uint16).tolist()  # *
-        colors = (np.array(sns.color_palette("Paired", 20)) * 255).astype(np.uint16).tolist()  # 12 *
-        # colors = (np.array(sns.color_palette("Set2")) * 255).astype(np.uint16).tolist()  # 8
+        colors = (np.array(sns.color_palette(color_type, num_colors)) * 255).astype(np.uint16).tolist()  # 12 *
         num_colors = len(colors)
         if num_objs == 0:
             return img

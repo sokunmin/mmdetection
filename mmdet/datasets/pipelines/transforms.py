@@ -253,6 +253,16 @@ class Resize(object):
                     backend=self.backend)
             results['gt_semantic_seg'] = gt_seg
 
+    def _resize_keypoints(self, results):
+        """Resize keypoints with ``results['scale_factor']``."""
+        img_shape = results['img_shape']
+        for key in results.get('keypoint_fields', []):
+            keypoints = results[key][..., :2] * results['scale_factor'][:2]
+            keep = (keypoints[..., 0] >= 0) * (keypoints[..., 0] < img_shape[1]) * \
+                   (keypoints[..., 1] >= 0) * (keypoints[..., 1] < img_shape[0])
+            results[key][..., :2] = keypoints
+            results[key][..., 2] = keep.astype(np.int)
+
     def __call__(self, results):
         """Call function to resize images, bounding boxes, masks, semantic
         segmentation map.
@@ -282,6 +292,7 @@ class Resize(object):
         self._resize_bboxes(results)
         self._resize_masks(results)
         self._resize_seg(results)
+        self._resize_keypoints(results)
         return results
 
     def __repr__(self):
@@ -391,6 +402,26 @@ class RandomFlip(object):
             raise ValueError(f"Invalid flipping direction '{direction}'")
         return flipped
 
+    def keypoint_flip(self, keypoints, img_shape, direction, flip_pairs):
+        """Flip keypoints horizontally.
+
+        Args:
+            keypoints (numpy.ndarray): Keypoints, shape (..., 17*k)
+            img_shape (tuple[int]): Image shape (height, width)
+            flip_pairs (numpy.ndarray, tuple, list): Flip pairs to change left-right keypoints
+        Returns:
+            numpy.ndarray: Flipped bounding boxes.
+        """
+        assert direction == 'horizontal'
+        w = img_shape[1]
+        keypoints[..., 0] = w - keypoints[..., 0] - 1
+
+        for pair in flip_pairs:
+            keypoints[..., pair[0], :], keypoints[..., pair[1], :] = \
+                keypoints[..., pair[1], :], keypoints[..., pair[0], :].copy()
+
+        return keypoints
+
     def __call__(self, results):
         """Call function to flip bounding boxes, masks, semantic segmentation
         maps.
@@ -444,6 +475,13 @@ class RandomFlip(object):
             for key in results.get('seg_fields', []):
                 results[key] = mmcv.imflip(
                     results[key], direction=results['flip_direction'])
+
+            # flip keypoints
+            for key in results.get('keypoint_fields', []):
+                results[key] = self.keypoint_flip(results[key],
+                                                  results['img_shape'],
+                                                  results['flip_direction'],
+                                                  results['flip_pairs'])
         return results
 
     def __repr__(self):
@@ -1489,7 +1527,7 @@ class RandomCenterCropPad(object):
         """
         img = results['img']
         h, w, c = img.shape
-        boxes = results['gt_bboxes']
+        boxes = results['gt_bboxes']  # > (#obj, 4)
         while True:
             scale = random.choice(self.ratios)
             new_h = int(self.crop_size[0] * scale)
@@ -1536,8 +1574,18 @@ class RandomCenterCropPad(object):
                             labels = labels[keep]
                             results['gt_labels'] = labels
                         if 'gt_masks' in results:
-                            raise NotImplementedError(
-                                'RandomCenterCropPad only supports bbox.')
+                            masks = results['gt_masks']
+                            results['gt_masks'] = masks.crop_and_paste(patch, border, (new_h, new_w))
+                        if 'gt_keypoints' in results:
+                            keypoints = results['gt_keypoints'][mask]
+                            keypoints[..., 0] += cropped_center_x - left_w - x0
+                            keypoints[..., 1] += cropped_center_y - top_h - y0
+                            keep = ~keypoints[..., 2].astype(np.bool)
+                            keypoints[keep, :2] = -1
+                            keep = (keypoints[..., 0] >= 0) * (keypoints[..., 0] < new_w) * \
+                                   (keypoints[..., 1] >= 0) * (keypoints[..., 1] < new_h) * keep
+                            keypoints[..., 2] = keep.astype(np.int)
+                            results['gt_keypoints'] = keypoints
 
                 # crop semantic seg
                 for key in results.get('seg_fields', []):

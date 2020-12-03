@@ -9,6 +9,7 @@ def gaussian2D(radius, sigma=1, dtype=torch.float32, device='cpu'):
     Args:
         radius (int): Radius of gaussian kernel.
         sigma (int): Sigma of gaussian function. Default: 1.
+              (tuple, list): Sigmas of gaussian function. (h, w)
         dtype (torch.dtype): Dtype of gaussian tensor. Default: torch.float32.
         device (str): Device of gaussian tensor. Default: 'cpu'.
 
@@ -16,12 +17,23 @@ def gaussian2D(radius, sigma=1, dtype=torch.float32, device='cpu'):
         h (Tensor): Gaussian kernel with a
             ``(2 * radius + 1) * (2 * radius + 1)`` shape.
     """
-    x = torch.arange(
-        -radius, radius + 1, dtype=dtype, device=device).view(1, -1)
-    y = torch.arange(
-        -radius, radius + 1, dtype=dtype, device=device).view(-1, 1)
+    if isinstance(radius, (tuple, list)):
+        y_radius, x_radius = (radius[0] - 1) / 2, (radius[1] - 1) / 2
+        x = torch.arange(
+            -x_radius, x_radius + 1, dtype=dtype, device=device).view(1, -1)
+        y = torch.arange(
+            -y_radius, y_radius + 1, dtype=dtype, device=device).view(-1, 1)
+    else:
+        x = torch.arange(
+            -radius, radius + 1, dtype=dtype, device=device).view(1, -1)
+        y = torch.arange(
+            -radius, radius + 1, dtype=dtype, device=device).view(-1, 1)
 
-    h = (-(x * x + y * y) / (2 * sigma * sigma)).exp()
+    if isinstance(sigma, (tuple, list)):
+        y_sigma, x_sigma = sigma
+        h = (-(x * x / (2 * x_sigma * x_sigma) + y * y / (2 * y_sigma * y_sigma))).exp()
+    else:
+        h = (-(x * x + y * y) / (2 * sigma * sigma)).exp()
 
     h[h < torch.finfo(h.dtype).eps * h.max()] = 0
     return h
@@ -35,25 +47,41 @@ def gen_gaussian_target(heatmap, center, radius, k=1):
             it and maintain the max value.
         center (list[int]): Coord of gaussian kernel's center.
         radius (int): Radius of gaussian kernel.
+               (tuple, list): Radius for height and width (h, w)
         k (int): Coefficient of gaussian kernel. Default: 1.
 
     Returns:
         out_heatmap (Tensor): Updated heatmap covered by gaussian kernel.
     """
-    diameter = 2 * radius + 1
-    gaussian_kernel = gaussian2D(
-        radius, sigma=diameter / 6, dtype=heatmap.dtype, device=heatmap.device)
+    if isinstance(radius, (tuple, list)):
+        h_diameter, w_diameter = 2 * radius[0] + 1, 2 * radius[1] + 1
+        h_sigma, w_sigma = h_diameter / 6, w_diameter / 6
+        sigma = (h_sigma, w_sigma)
+        gaussian_kernel = gaussian2D(
+            (h_diameter, w_diameter), sigma=sigma, dtype=heatmap.dtype, device=heatmap.device)
+    else:
+        sigma = (2 * radius + 1) / 6
+        gaussian_kernel = gaussian2D(
+            radius, sigma=sigma, dtype=heatmap.dtype, device=heatmap.device)
 
     x, y = center
 
     height, width = heatmap.shape[:2]
 
-    left, right = min(x, radius), min(width - x, radius + 1)
-    top, bottom = min(y, radius), min(height - y, radius + 1)
+    if isinstance(radius, (tuple, list)):
+        left, right = min(x, radius[1]), min(width - x, radius[1] + 1)
+        top, bottom = min(y, radius[0]), min(height - y, radius[0] + 1)
 
-    masked_heatmap = heatmap[y - top:y + bottom, x - left:x + right]
-    masked_gaussian = gaussian_kernel[radius - top:radius + bottom,
-                                      radius - left:radius + right]
+        masked_heatmap = heatmap[y - top:y + bottom, x - left:x + right]
+        masked_gaussian = gaussian_kernel[radius[0] - top:radius[0] + bottom,
+                                          radius[1] - left:radius[1] + right]
+    else:
+        left, right = min(x, radius), min(width - x, radius + 1)
+        top, bottom = min(y, radius), min(height - y, radius + 1)
+
+        masked_heatmap = heatmap[y - top:y + bottom, x - left:x + right]
+        masked_gaussian = gaussian_kernel[radius - top:radius + bottom,
+                                          radius - left:radius + right]
     out_heatmap = heatmap
     torch.max(
         masked_heatmap,
