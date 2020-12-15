@@ -219,6 +219,7 @@ class LoadAnnotations(object):
                  with_seg=False,
                  with_keypoint=False,
                  poly2mask=True,
+                 with_mask_ignore=False,
                  file_client_args=dict(backend='disk')):
         self.with_bbox = with_bbox
         self.with_label = with_label
@@ -226,6 +227,7 @@ class LoadAnnotations(object):
         self.with_seg = with_seg
         self.with_keypoint = with_keypoint
         self.poly2mask = poly2mask
+        self.with_mask_ignore = with_mask_ignore
         self.file_client_args = file_client_args.copy()
         self.file_client = None
 
@@ -318,8 +320,9 @@ class LoadAnnotations(object):
                 :obj:`PolygonMasks`. Otherwise, :obj:`BitmapMasks` is used.
         """
 
+        ann_info = results['ann_info']
         h, w = results['img_info']['height'], results['img_info']['width']
-        gt_masks = results['ann_info']['masks']
+        gt_masks = ann_info['masks']
         if self.poly2mask:
             gt_masks = BitmapMasks(
                 [self._poly2mask(mask, h, w) for mask in gt_masks], h, w)
@@ -328,6 +331,10 @@ class LoadAnnotations(object):
                 [self.process_polygons(polygons) for polygons in gt_masks], h,
                 w)
         results['gt_masks'] = gt_masks
+        gt_masks_ignore = ann_info.get('masks_ignore', None)
+        if gt_masks_ignore is not None and self.with_mask_ignore:
+            results['gt_masks_ignore'] = gt_masks_ignore.copy()
+            results['mask_fields'].append('gt_masks_ignore')
         results['mask_fields'].append('gt_masks')
         return results
 

@@ -15,6 +15,8 @@ from mmdet.core import eval_recalls
 from . import CocoDataset
 from .builder import DATASETS
 from mmcv.utils import print_log
+import pycocotools.mask as maskUtils
+from ..core.bbox.transforms import mask2polybox
 
 try:
     import pycocotools
@@ -111,10 +113,17 @@ class CocoPersonDataset(CocoDataset):
         gt_bboxes = []
         gt_labels = []
         gt_bboxes_ignore = []
-        gt_masks_ann = []
+        gt_masks = []
         gt_keypoints = []
+        gt_affine_centers = []
+        gt_affine_scales = []
+        width, height = img_info['width'], img_info['height']
+        gt_mask_all = np.zeros((height, width), dtype=np.uint8)
+        gt_mask_miss = np.zeros((height, width), dtype=np.uint8)
+        mask_crowd = None
+        ann_info = self.correct_mislabeled(img_info, ann_info)
         for i, ann in enumerate(ann_info):
-            if ann.get('ignore', False):
+            if ann.get('ignore', False) or ann['num_keypoints'] == 0:
                 continue
             x1, y1, w, h = ann['bbox']
             inter_w = max(0, min(x1 + w, img_info['width']) - max(x1, 0))
@@ -126,17 +135,32 @@ class CocoPersonDataset(CocoDataset):
             if ann['category_id'] not in self.cat_ids:
                 continue
             bbox = [x1, y1, x1 + w, y1 + h]
+            # > used for affine transform
+            center = [x1 + w / 2, y1 + h / 2]
+            scale = h / height
+            mask = self.coco.annToMask(ann)
             if ann.get('iscrowd', False):
                 gt_bboxes_ignore.append(bbox)
+                mask_temp = np.bitwise_and(mask, gt_mask_all)
+                mask_crowd = mask - mask_temp
             else:
+                # > bboxes and labels
                 gt_bboxes.append(bbox)
                 gt_labels.append(self.cat2label[ann['category_id']])
-                gt_masks_ann.append(ann.get('segmentation', None))
-                # keypoints
+                # > affine center & scale
+                gt_affine_centers.append(center)
+                gt_affine_scales.append(scale)
+                # > masks
+                gt_masks.append(ann.get('segmentation', None))
+                gt_mask_all = np.bitwise_or(mask, gt_mask_all)
+                if ann['num_keypoints'] <= 0:
+                    gt_mask_miss = np.bitwise_or(mask, gt_mask_miss)
+                # > keypoints
                 gt_keypoint = np.zeros((self.num_keypoints, 3), dtype=np.float32)
                 kp = np.array(ann['keypoints'])
                 gt_keypoint[:, 0] = kp[0::3]
                 gt_keypoint[:, 1] = kp[1::3]
+                # `0`: not labeled, `1`: labeled but invisible, `2`: labeled and visible
                 gt_keypoint[:, 2] = (kp[2::3] > 0).astype(np.int32)
                 gt_keypoints.append(gt_keypoint)
 
@@ -152,9 +176,26 @@ class CocoPersonDataset(CocoDataset):
         else:
             gt_bboxes_ignore = np.zeros((0, 4), dtype=np.float32)
 
+        if mask_crowd is not None:
+            gt_mask_miss = np.logical_not((np.bitwise_or(gt_mask_miss, mask_crowd)))
+            gt_mask_all = np.bitwise_or(gt_mask_all, mask_crowd)
+        else:
+            gt_mask_miss = np.logical_not(gt_mask_miss)
+
+        gt_mask_miss = gt_mask_miss.astype(np.uint8)
+        gt_mask_all = gt_mask_all.astype(np.uint8)
+        gt_mask_miss *= 255
+        gt_mask_all *= 255
+        gt_mask_ignore = np.concatenate(
+            (gt_mask_all[None, :], gt_mask_miss[None, :]), axis=0)
+
         if gt_keypoints:
+            gt_affine_centers = np.array(gt_affine_centers, dtype=np.float32)
+            gt_affine_scales = np.array(gt_affine_scales, dtype=np.float32)
             gt_keypoints = np.array(gt_keypoints, dtype=np.float32)
         else:
+            gt_affine_centers = np.zeros((0, 2), dtype=np.float32)
+            gt_affine_scales = np.zeros((0, 1), dtype=np.float32)
             gt_keypoints = np.zeros((0, self.num_keypoints, 3), dtype=np.float32)
 
         seg_map = img_info['filename'].replace('jpg', 'png')
@@ -163,10 +204,52 @@ class CocoPersonDataset(CocoDataset):
             bboxes=gt_bboxes,
             labels=gt_labels,
             bboxes_ignore=gt_bboxes_ignore,
-            masks=gt_masks_ann,
+            masks=gt_masks,
+            masks_ignore=gt_mask_ignore,
             seg_map=seg_map,
             keypoints=gt_keypoints,
+            affine_centers=gt_affine_centers,
+            affine_scales=gt_affine_scales,
             flip_pairs=self.flip_pairs,
         )
 
         return ann
+
+    def _poly2mask(self, mask_ann, img_h, img_w):
+        rles = maskUtils.frPyObjects(mask_ann, img_h, img_w)
+        rle = maskUtils.merge(rles)
+        return rle
+
+    def correct_mislabeled(self, img_info, ann_info):
+        img_name = img_info['file_name']
+        if '000000223299' in img_name:
+            for i, p in enumerate(ann_info):
+                num_keypoints = ann_info[i]['num_keypoints']
+                if num_keypoints == 16:
+                    bbox = ann_info[i]['bbox']
+                    bbox[2] += 145
+                    keypoints = ann_info[i]['keypoints']
+                    keypoints[15*3] += 37
+                    ann_info[i]['keypoins'] = keypoints
+        if '000000251523' in img_name:
+            obj1_masks = ann_info[0]['segmentation']
+            obj2_keypoints = ann_info[1]['keypoints']
+            obj2_masks = ann_info[1]['segmentation']
+
+            obj1_masks = maskUtils.decode(self._poly2mask(obj1_masks, img_info['height'], img_info['width']))
+            obj2_masks = maskUtils.decode(self._poly2mask(obj2_masks, img_info['height'], img_info['width']))
+            new_mask = np.maximum(obj1_masks, obj2_masks)
+            new_keypoints = obj2_keypoints
+            new_bbox = mask2polybox(new_mask)[1]
+            new_mask = maskUtils.encode(new_mask)
+
+            ann_info[0]['bbox'] = new_bbox
+            ann_info[0]['keypoints'] = new_keypoints
+            ann_info[0]['segmentation'] = new_mask
+            ann_info[0]['num_keypoints'] = (np.array(new_keypoints)[2::3] > 0).sum()
+            ann_info[0]['area'] = maskUtils.area(new_mask)
+            del ann_info[1]
+
+        if '000000223714' in img_name:
+            print()
+        return ann_info

@@ -1,12 +1,15 @@
 import inspect
-
+import math
+import cv2
 import mmcv
 import numpy as np
 from numpy import random
 
-from mmdet.core import PolygonMasks
+from mmdet.core import PolygonMasks, BitmapMasks
 from mmdet.core.evaluation.bbox_overlaps import bbox_overlaps
 from ..builder import PIPELINES
+from ...core.bbox.transforms import mask2polybox
+from ...utils.vis_debug import show_anno
 
 try:
     from imagecorruptions import corrupt
@@ -1396,7 +1399,8 @@ class RandomCenterCropPad(object):
                  std=None,
                  to_rgb=None,
                  test_mode=False,
-                 test_pad_mode=('logical_or', 127)):
+                 test_pad_mode=('logical_or', 127),
+                 with_mask2bbox=False):
         if test_mode:
             assert crop_size is None, 'crop_size must be None in test mode'
             assert ratios is None, 'ratios must be None in test mode'
@@ -1429,6 +1433,7 @@ class RandomCenterCropPad(object):
             self.std = std
         self.test_mode = test_mode
         self.test_pad_mode = test_pad_mode
+        self.with_mask2bbox = with_mask2bbox
 
     def _get_border(self, border, size):
         """Get final border for the target size.
@@ -1449,20 +1454,32 @@ class RandomCenterCropPad(object):
         i = pow(2, np.ceil(np.log2(np.ceil(k))) + (k == int(k)))
         return border // i
 
-    def _filter_boxes(self, patch, boxes):
+    def _filter_boxes(self, patch, boxes, keypoints=None, kp_in_box=False):
         """Check whether the center of each box is in the patch.
 
         Args:
             patch (list[int]): The cropped area, [left, top, right, bottom].
             boxes (numpy array, (N x 4)): Ground truth boxes.
+            keypoints (numpy array, (N x 17): Ground truth keypoints.
 
         Returns:
             mask (numpy array, (N,)): Each box is inside or outside the patch.
         """
         center = (boxes[:, :2] + boxes[:, 2:]) / 2
-        mask = (center[:, 0] > patch[0]) * (center[:, 1] > patch[1]) * (
-            center[:, 0] < patch[2]) * (
-                center[:, 1] < patch[3])
+        mask = (center[:, 0] > patch[0]) * (center[:, 1] > patch[1]) * \
+               (center[:, 0] < patch[2]) * (center[:, 1] < patch[3])  # > (#obj,)
+        # center is outside the patch but some of keypoints are still inside.
+        if keypoints is not None:
+            if kp_in_box:
+                mask = (keypoints[..., 0] >= boxes[:, 0, None]) * \
+                       (keypoints[..., 1] >= boxes[:, 1, None]) * \
+                       (keypoints[..., 0] <= boxes[:, 2, None]) * \
+                       (keypoints[..., 1] <= boxes[:, 3, None])
+            else:
+                # > keypoints: (#obj, 17, 3) -> (#obj, 17)
+                mask = (keypoints[..., 0] > patch[0]) * (keypoints[..., 1] > patch[1]) * \
+                       (keypoints[..., 0] < patch[2]) * (keypoints[..., 1] < patch[3])
+            mask = mask.any(axis=1)
         return mask
 
     def _crop_image_and_paste(self, image, center, size):
@@ -1528,6 +1545,8 @@ class RandomCenterCropPad(object):
         img = results['img']
         h, w, c = img.shape
         boxes = results['gt_bboxes']  # > (#obj, 4)
+        if len(boxes) == 0:
+            return results
         while True:
             scale = random.choice(self.ratios)
             new_h = int(self.crop_size[0] * scale)
@@ -1542,9 +1561,15 @@ class RandomCenterCropPad(object):
                 cropped_img, border, patch = self._crop_image_and_paste(
                     img, [center_y, center_x], [new_h, new_w])
 
+                # > filter bboxes beyond the patch
+                mask = (boxes[:, 0] >= patch[2]) * (boxes[:, 1] >= patch[3]) * \
+                       (boxes[:, 2] <= patch[0]) * (boxes[:, 3] <= patch[1])
+                boxes = boxes[~mask]
+
                 mask = self._filter_boxes(patch, boxes)
                 # if image do not have valid bbox, any crop patch is valid.
-                if not mask.any() and len(boxes) > 0:
+                if not mask.all() and len(boxes) > 0:
+                    boxes = results['gt_bboxes']
                     continue
 
                 results['img'] = cropped_img
@@ -1555,17 +1580,29 @@ class RandomCenterCropPad(object):
 
                 left_w, top_h = center_x - x0, center_y - y0
                 cropped_center_x, cropped_center_y = new_w // 2, new_h // 2
-
                 # crop bboxes accordingly and clip to the image boundary
                 for key in results.get('bbox_fields', []):
-                    mask = self._filter_boxes(patch, results[key])
-                    bboxes = results[key][mask]
-                    bboxes[:, 0:4:2] += cropped_center_x - left_w - x0
-                    bboxes[:, 1:4:2] += cropped_center_y - top_h - y0
-                    bboxes[:, 0:4:2] = np.clip(bboxes[:, 0:4:2], 0, new_w)
-                    bboxes[:, 1:4:2] = np.clip(bboxes[:, 1:4:2], 0, new_h)
+                    if self.with_mask2bbox and 'ignore' not in key:
+                        if 'gt_masks' in results:
+                            masks = results['gt_masks']
+                            results['gt_masks'] = masks.crop_and_paste(patch, border, (new_h, new_w))
+                            bboxes = []
+                            for m in results['gt_masks'].masks:
+                                bboxes.append(mask2polybox(m)[1])
+                            bboxes = np.array(bboxes)
+                            mask = self._filter_boxes(patch, bboxes, keypoints=results['gt_keypoints'])
+                            bboxes = bboxes[mask]
+                        else:
+                            raise ValueError("'gt_masks' key not found.")
+                    else:
+                        mask = self._filter_boxes(patch, results[key])
+                        bboxes = results[key][mask]
+                        bboxes[:, 0:4:2] += cropped_center_x - left_w - x0
+                        bboxes[:, 1:4:2] += cropped_center_y - top_h - y0
+                        bboxes[:, 0:4:2] = np.clip(bboxes[:, 0:4:2], 0, new_w)
+                        bboxes[:, 1:4:2] = np.clip(bboxes[:, 1:4:2], 0, new_h)
                     keep = (bboxes[:, 2] > bboxes[:, 0]) & (
-                        bboxes[:, 3] > bboxes[:, 1])
+                            bboxes[:, 3] > bboxes[:, 1])
                     bboxes = bboxes[keep]
                     results[key] = bboxes
                     if key in ['gt_bboxes']:
@@ -1575,18 +1612,26 @@ class RandomCenterCropPad(object):
                             results['gt_labels'] = labels
                         if 'gt_masks' in results:
                             masks = results['gt_masks']
-                            results['gt_masks'] = masks.crop_and_paste(patch, border, (new_h, new_w))
+                            if self.with_mask2bbox:
+                                results['gt_masks'] = masks[mask][keep]
+                            else:
+                                results['gt_masks'] = masks.crop_and_paste(patch, border, (new_h, new_w))
                         if 'gt_keypoints' in results:
-                            keypoints = results['gt_keypoints'][mask]
+                            keypoints = results['gt_keypoints'][mask][keep]  # > (#obj, 17, 3)
                             keypoints[..., 0] += cropped_center_x - left_w - x0
                             keypoints[..., 1] += cropped_center_y - top_h - y0
-                            keep = ~keypoints[..., 2].astype(np.bool)
-                            keypoints[keep, :2] = -1
+                            keep = keypoints[..., 2].astype(np.bool)  # > (#obj, 17)
                             keep = (keypoints[..., 0] >= 0) * (keypoints[..., 0] < new_w) * \
                                    (keypoints[..., 1] >= 0) * (keypoints[..., 1] < new_h) * keep
                             keypoints[..., 2] = keep.astype(np.int)
+                            not_keep = ~keypoints[..., 2].astype(np.bool)
+                            keypoints[not_keep, :2] = -1
                             results['gt_keypoints'] = keypoints
-
+                            # > filter out bboxes without any keypoints
+                            mask = self._filter_boxes(patch, bboxes, keypoints, kp_in_box=True)
+                            results[key] = results[key][mask]
+                            results['gt_masks'] = results['gt_masks'][mask]
+                            results['gt_keypoints'] = keypoints[mask]
                 # crop semantic seg
                 for key in results.get('seg_fields', []):
                     raise NotImplementedError(
@@ -1758,3 +1803,308 @@ class RandomLighting(object):
         repr_str = self.__class__.__name__
         repr_str += f'(scale={self.scale}, '
         return repr_str
+
+
+@PIPELINES.register_module
+class AffineTransform(object):
+    """Affine transform the image, bbox, mask and keypoint.
+
+    If the input dict contains the key "flip", then the flag will be used,
+    otherwise it will be randomly decided by a ratio specified in the init
+    method.
+
+    Args:
+        flip_ratio (float, optional): The flipping probability.
+        shift_pixels (int): The distance to translate image center.
+        scale_ratio (float):
+        rotate_angle (float, list): Maximum of rotating left or right angle.
+        tint_ratio (float): The distorting color probability.
+    """
+    def __init__(self,
+                 img_scale=None,
+                 ratio_mode='range',
+                 flip_ratio=0.5,
+                 flip_direction='horizontal',
+                 shift_pixels=50.,
+                 scale_ratio=0.8,
+                 scale_range=(0.7, 1.3),
+                 min_occupation_ratio=0.6,
+                 rotate_angle=40,
+                 img_pad_value=(124, 127, 127),
+                 mask_pad_value=[],
+                 with_mask2bbox=False,
+                 show_debug=False):
+        self.img_scale = img_scale
+        self.ratio_mode = ratio_mode
+        self.scale_ratio = scale_ratio
+        self.scale_range = scale_range
+        self.min_iou_ratio = min_occupation_ratio
+        self.rotate_angle = rotate_angle
+        self.shift_pixels = shift_pixels
+        self.flip_ratio = flip_ratio
+        self.flip_direction = flip_direction
+        self.img_pad_value = img_pad_value
+        self.mask_pad_value = mask_pad_value
+        self.with_mask2bbox = with_mask2bbox
+        self.show_debug = show_debug
+
+        assert isinstance(img_scale, (tuple, list))
+        assert ratio_mode in ['value', 'range']
+        if flip_ratio is not None:
+            assert 0 <= flip_ratio <= 1
+        assert flip_direction in ['horizontal', 'vertical']
+        assert isinstance(scale_range, tuple)
+        assert len(scale_range) == 2
+        assert 0 <= scale_range[0] < scale_range[1]
+        if type(shift_pixels) in (tuple, list):
+            assert len(shift_pixels) == 2, "Invalid range"
+            assert shift_pixels[0] <= shift_pixels[1]
+        else:
+            assert shift_pixels > 0, "Rotate must be a positive integer"
+            self.shift_pixels = (-shift_pixels, shift_pixels)
+
+        if type(rotate_angle) in (tuple, list):
+            assert len(rotate_angle) == 2, "Invalid range"
+            assert rotate_angle[0] <= rotate_angle[1]
+        else:
+            assert rotate_angle > 0, "Rotate must be a positive integer"
+            self.rotate_angle = (max(-359, -rotate_angle), min(359, rotate_angle))
+
+    def _random_flip(self, results):
+        if 'flip' not in results:
+            flip = True if np.random.rand() < self.flip_ratio else False
+            results['flip'] = flip
+        if 'flip_direction' not in results:
+            results['flip_direction'] = self.flip_direction
+        matrix = np.array([
+            [-1 if results['flip'] else 1, 0, 0],
+            [0, 1, 0],
+            [0, 0, 1]
+        ], dtype=np.float32)
+        return matrix
+
+    def _random_shift(self, ann_info):
+        x_offset = 0
+        y_offset = 0
+        if 'affine_shift' not in ann_info and len(ann_info['labels']) > 0:
+            x_offset = np.random.randint(self.shift_pixels[0], self.shift_pixels[1])
+            y_offset = np.random.randint(self.shift_pixels[0], self.shift_pixels[1])
+            ann_info['affine_shift'] = (x_offset, y_offset)
+        x = self.img_scale[0] / 2 - 0.5 + x_offset
+        y = self.img_scale[1] / 2 - 0.5 + y_offset
+        matrix = np.array([
+            [1, 0, x],
+            [0, 1, y],
+            [0, 0, 1]
+        ], dtype=np.float32)
+        return matrix
+
+    def _random_rotate(self, ann_info):
+        rotate_angle = 0
+        if 'affine_rotate' not in ann_info and len(ann_info['labels']) > 0:
+            rotate_angle = np.random.randint(self.rotate_angle[0], self.rotate_angle[1])
+            ann_info['affine_rotate'] = rotate_angle
+
+        A = math.cos(rotate_angle / 180. * math.pi)
+        B = math.sin(rotate_angle / 180. * math.pi)
+        matrix = np.array([
+            [A, B, 0],
+            [-B, A, 0],
+            [0, 0, 1]
+        ], dtype=np.float32)
+        return matrix
+
+    def _random_scale(self, results, ann_info, affine_scale):
+        scale = 1.0
+        scale_factor = 1.0
+        if 'scale' not in results and len(ann_info['labels']) > 0:
+            scale_delta = self.scale_range[1] - self.scale_range[0]
+            scale = self.scale_range[0] + scale_delta * np.random.uniform(0, 1) \
+                if np.random.rand() < self.scale_ratio else 1.0
+            scale_factor = self.min_iou_ratio / affine_scale * scale
+        matrix = np.array([
+            [scale_factor, 0, 0],
+            [0, scale_factor, 0],
+            [0, 0, 1]
+        ], dtype=np.float32)
+        results['scale'] = scale
+        results['scale_factor'] = scale_factor
+        return matrix
+
+    def _warp_affine(self,
+                     src,
+                     M,
+                     dsize,
+                     flags=cv2.INTER_LINEAR,
+                     border_mode=cv2.BORDER_CONSTANT,
+                     border_value=0):
+        return cv2.warpAffine(
+            src, M, dsize, flags=flags, borderMode=border_mode, borderValue=border_value)
+
+    def __call__(self, results):
+        ann_info = results['ann_info']
+        assert 'affine_centers' in ann_info and 'affine_scales' in ann_info
+        assert self.with_mask2bbox == True, "Only support 'mask2bbox' method"
+        affine_centers = ann_info['affine_centers']
+        affine_scales = ann_info['affine_scales']
+        num_obj = len(affine_scales)
+        img_width, img_height = self.img_scale
+        ori_shape = results['img'].shape
+
+        for i in range(50):
+            if num_obj == 0:
+                init_center = (0, 0)
+                init_scale = 1.0
+                init_idx = 0
+            else:
+                init_idx = np.random.randint(0, num_obj)
+                init_center = affine_centers[init_idx]
+                init_scale = affine_scales[init_idx] * (img_height / (img_height - 1))
+            # > zero-centered
+            init_matrix = np.array([
+                [1, 0, -init_center[0]],
+                [0, 1, -init_center[1]],
+                [0, 0, 1]
+            ], dtype=np.float32)
+
+            # > order of combination is reversed
+            shift_matrix = self._random_shift(ann_info)
+            flip_matrix = self._random_flip(results)
+            scale_matrix = self._random_scale(results, ann_info,
+                                              ann_info['affine_scales'][init_idx] if num_obj > 0 else 0)
+            rotate_matrix = self._random_rotate(ann_info)
+            combined_matrix = shift_matrix @ flip_matrix @ scale_matrix @ rotate_matrix @ init_matrix
+            combined_matrix = combined_matrix[:2]
+
+            affine_meta = dict(center=init_center, scale=init_scale, matrix=combined_matrix)
+            results['affine_meta'] = affine_meta
+
+            # > img
+            if self.show_debug:
+                show_anno(results['img'], results['gt_bboxes'], results['gt_masks'], results['gt_keypoints'])
+
+            if num_obj == 0:
+                results = self._transform_img(results, results['affine_meta']['matrix'])
+                return results
+            # > masks: `gt_masks`, `gt_masks_ignore`
+            for i, key in enumerate(results.get('mask_fields', [])):
+                if results[key] is None:
+                    continue
+                masks = results[key]
+                if 'gt_masks_ignore' in key:
+                    pad_values = self.mask_pad_value.mask_ignore  # > for `mask_all` and `mask_miss`
+                    masks = [self._warp_affine(
+                        mask, combined_matrix, self.img_scale, border_value=pad_value)
+                        for mask, pad_value in zip(masks, pad_values)]
+                    results[key] = np.stack(masks).astype(np.float32) / 255
+                else:
+                    pad_value = self.mask_pad_value.mask
+                    masks = BitmapMasks([self._warp_affine(
+                        mask, combined_matrix, self.img_scale, border_value=pad_value)
+                        for mask in masks], self.img_scale[0], self.img_scale[1])
+                    if self.with_mask2bbox:
+                        bboxes = []
+                        for m in masks:
+                            bbox = mask2polybox(m)[1]
+                            bboxes.append(bbox)
+                        bboxes = np.array(bboxes, dtype=np.float32)
+                        keep_visible = self._filter_bbox(bboxes)
+                        if not keep_visible.any():
+                            self._del_random_args(results, ann_info)
+                            break
+                        bboxes = bboxes[keep_visible]
+                        masks = masks[keep_visible]
+                        keep_center = self._filter_bbox(bboxes, patch=(0, 0, img_width, img_height))
+                        # check every valid center inside a box
+                        if not keep_center.all() and len(bboxes) > 0:
+                            self._del_random_args(results, ann_info)
+                            break
+                    else:
+                        raise NotImplementedError
+
+                    # > keypoints
+                    for key in results.get('keypoint_fields', []):
+                        if results[key] is None:
+                            continue
+                        if 'gt_keypoints' in key:
+                            keypoints = results[key][keep_visible]
+                            keypoints = keypoints[keep_center]
+                            # assign `1` at axis 3 for affine transform
+                            _keypoints = keypoints.copy()
+                            _keypoints[..., 2] = 1
+                            keypoints[..., :2] = (combined_matrix @ _keypoints.transpose([0, 2, 1])).transpose([0, 2, 1])[..., :2]
+
+                            if results['flip']:
+                                flip_pairs = ann_info['flip_pairs']
+                                left_pair = flip_pairs[:, 0]
+                                right_pair = flip_pairs[:, 1]
+                                left_keypoints = keypoints[:, left_pair, :]
+                                right_keypoints = keypoints[:, right_pair, :]
+                                keypoints[:, left_pair, :] = right_keypoints
+                                keypoints[:, right_pair, :] = left_keypoints
+                            # > remove keypoints beyond the scope
+                            keep = keypoints[..., 2].astype(np.bool)  # > (#obj, 17)
+                            keep = (keypoints[..., 0] >= 0) * (keypoints[..., 0] < self.img_scale[1]) * \
+                                   (keypoints[..., 1] >= 0) * (keypoints[..., 1] < self.img_scale[0]) * keep
+                            keypoints[..., 2] = keep.astype(np.int)
+                            not_keep = ~keypoints[..., 2].astype(np.bool)
+                            keypoints[not_keep, :2] = -1
+                            # > check at least one keypoint inside a box
+                            keep = self._filter_bbox(bboxes, keypoints, kp_in_box=True)
+                            if not keep.any():
+                                self._del_random_args(results, ann_info)
+                                break
+                            results[key] = keypoints[keep]
+                            results['gt_bboxes'] = bboxes[keep_center][keep]
+                            results['gt_masks'] = masks[keep_center][keep]
+            results = self._transform_img(results, results['affine_meta']['matrix'])
+            if self.show_debug:
+                show_anno(results['img'], results['gt_bboxes'], results['gt_masks'], results['gt_keypoints'])
+            return results
+
+        results = self._transform_img(results, results['affine_meta']['matrix'])
+        return results
+
+    def _transform_img(self, results, matrix):
+        results['img'] = self._warp_affine(
+            results['img'], matrix, self.img_scale, border_value=self.img_pad_value)
+        if 'gt_masks' in results:
+            img_height, img_width = self.img_scale
+            if results['gt_masks'].masks.shape[1:] != results['img'].shape[:2] \
+                    and len(results['gt_labels']) == 0:
+                results['gt_masks'] = BitmapMasks([], img_height, img_width)
+                results['gt_masks_ignore'] = np.zeros((2, img_height, img_width), dtype=np.uint8)
+
+        results['pad_shape'] = results['img'].shape
+        if 'flip' not in results:
+            results['flip'] = False
+        return results
+
+    def _del_random_args(self, results, ann_info):
+        del results['flip']
+        del ann_info['affine_shift']
+        del ann_info['affine_rotate']
+
+    def _affine_transform(self, pt, t):
+        new_pt = np.array([pt[0], pt[1], 1.]).T
+        new_pt = np.dot(t, new_pt)
+        return new_pt[:2]
+
+    def _filter_bbox(self, boxes, keypoints=None, patch=None, kp_in_box=False):
+        if kp_in_box and keypoints is not None:
+            # TOCHECK: NOTE: not working in random rotate
+            mask = (keypoints[..., 0] >= boxes[:, 0, None]) * \
+                   (keypoints[..., 1] >= boxes[:, 1, None]) * \
+                   (keypoints[..., 0] <= boxes[:, 2, None]) * \
+                   (keypoints[..., 1] <= boxes[:, 3, None])
+            mask = mask.any(axis=1)
+        elif patch is not None and boxes is not None:
+            center = (boxes[:, :2] + boxes[:, 2:]) / 2
+            mask = (center[:, 0] > patch[0]) * (center[:, 1] > patch[1]) * \
+                   (center[:, 0] < patch[2]) * (center[:, 1] < patch[3])  # > (#obj,)
+        else:
+            if len(boxes) == 0:
+                return np.array([])
+            assert len(boxes.shape) == 2
+            mask = boxes.sum(axis=1) > 0
+        return mask

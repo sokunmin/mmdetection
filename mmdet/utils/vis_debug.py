@@ -3,6 +3,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.collections import PatchCollection
 from matplotlib.patches import Polygon
+
+from mmdet.core import BitmapMasks
 from mmdet.core.bbox.transforms import mask2polybox
 
 
@@ -18,14 +20,15 @@ def show_anno(img, gt_bboxes, gt_masks, gt_keypoints, kp_skeleton='coco', save_i
                              [6, 8], [7, 9], [8, 10], [1, 2], [0, 1],
                              [0, 2], [1, 3], [2, 4], [3, 5], [4, 6]])
     gt_mask_polys = []
+    masks = gt_masks.masks if isinstance(gt_masks, BitmapMasks) else gt_masks
     if gt_bboxes is None:
         gt_bboxes = []
-        for mask in gt_masks.masks:
+        for mask in masks:
             polys, bbox = mask2polybox(mask)
             gt_bboxes.append(bbox)
             gt_mask_polys.append(polys)
     else:
-        for mask in gt_masks.masks:
+        for mask in masks:
             polys, _ = mask2polybox(mask)
             gt_mask_polys.append(polys)
 
@@ -36,7 +39,7 @@ def show_anno(img, gt_bboxes, gt_masks, gt_keypoints, kp_skeleton='coco', save_i
     ax.set_autoscale_on(False)
     polygons = []
     color = []
-    plt.text(10, 30, f'#obj = {num_instances}', fontsize=14, color='r')
+    plt.text(10, 30, f'#obj={num_instances}', fontsize=14, color='r')
 
     for i in range(num_instances):
         # > bbox drawing

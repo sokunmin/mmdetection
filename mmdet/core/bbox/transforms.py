@@ -224,7 +224,7 @@ def mask2polybox(mask, cnt_epsilon=0.003):
         polygons.append(mask_poly)
 
     if len(polygons) == 0:
-        return None, None
+        return [], np.ones((4,), np.int) * -1
 
     # compute bbox
     box_poly = np.concatenate(polygons, axis=0)
