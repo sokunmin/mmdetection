@@ -54,6 +54,7 @@ def gen_gaussian_target(heatmap, center, radius, k=1):
         out_heatmap (Tensor): Updated heatmap covered by gaussian kernel.
     """
     if isinstance(radius, (tuple, list)):
+        assert len(radius) == 2
         h_diameter, w_diameter = 2 * radius[0] + 1, 2 * radius[1] + 1
         h_sigma, w_sigma = h_diameter / 6, w_diameter / 6
         sigma = (h_sigma, w_sigma)

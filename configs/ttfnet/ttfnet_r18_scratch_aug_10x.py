@@ -28,7 +28,5 @@ model = dict(
         norm_cfg=dict(type='BN'),
         alpha=0.54,
         loss_cls=dict(
-            type='CenterFocalLoss',
-            gamma=2.0,
-            loss_weight=1.0),
+            type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1),
         loss_bbox=dict(type='CenterGIoULoss', loss_weight=5.0)))

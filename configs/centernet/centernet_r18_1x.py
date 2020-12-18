@@ -30,7 +30,9 @@ model = dict(
             stride=2,
             padding=1,
             output_padding=0,
-            bias=False
+            bias=False,
+            with_last_bn=True,
+            with_last_relu=True
         ),
         loss_heatmap=dict(
             type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1),

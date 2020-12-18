@@ -1,16 +1,19 @@
+from .single_stage_mt import SingleStageMultiDetector
 from ..builder import DETECTORS
-from .single_stage import SingleStageDetector
 
 
 @DETECTORS.register_module()
-class TTFNet(SingleStageDetector):
+class TTFNet(SingleStageMultiDetector):
 
     def __init__(self,
                  backbone,
                  neck=None,
                  bbox_head=None,
+                 mask_head=None,
+                 keypoint_head=None,
                  train_cfg=None,
                  test_cfg=None,
-                 pretrained=None):
-        super(TTFNet, self).__init__(backbone, neck, bbox_head, train_cfg,
-                                     test_cfg, pretrained)
+                 pretrained=None,
+                 loss_balance=None):
+        super(TTFNet, self).__init__(backbone, neck, bbox_head, mask_head, keypoint_head,
+                                        train_cfg, test_cfg, pretrained, loss_balance)

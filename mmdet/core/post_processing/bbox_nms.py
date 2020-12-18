@@ -146,13 +146,3 @@ def fast_nms(multi_bboxes,
 
     cls_dets = torch.cat([boxes, scores[:, None]], dim=1)
     return cls_dets, classes, coeffs
-
-
-def simple_nms(fmap, pool_size=3):
-    pad = (pool_size - 1) // 2
-    fmap_max = nn.functional.max_pool2d(fmap,
-                                       (pool_size, pool_size),
-                                       stride=1,
-                                       padding=pad)
-    keep = (fmap_max == fmap).float()
-    return fmap * keep

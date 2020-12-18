@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mmcv.cnn import normal_init, kaiming_init, build_upsample_layer, build_norm_layer
+from mmcv.cnn import normal_init, kaiming_init, build_upsample_layer, build_norm_layer, xavier_init
 from mmcv.cnn import ConvModule, bias_init_with_prob
 from mmcv.ops import ModulatedDeformConv2dPack, CARAFEPack
 from mmcv.runner import force_fp32
@@ -11,11 +11,6 @@ from mmdet.core import multi_apply, calc_region
 from ..builder import HEADS, build_loss
 from .corner_head import CornerHead
 from ..utils import gaussian_radius, gen_gaussian_target
-
-# TOCHECK:
-#  0. init_weights() & keypint_topk()
-#  3. FocalL2Loss vs. GaussianFocalLoss vs. L1Loss
-#  4. FPN style
 
 
 @HEADS.register_module
@@ -27,6 +22,7 @@ class CenterHead(CornerHead):
                  feat_channels=256,
                  max_objs=128,
                  upsample_cfg=None,
+                 shortcut_cfg=None,
                  loss_bbox=dict(type='L1Loss', loss_weight=0.1),
                  **kwargs):
         self.max_objs = max_objs
@@ -34,24 +30,43 @@ class CenterHead(CornerHead):
         self.feat_channels = feat_channels
         self.upsample_cfg = upsample_cfg
         self.with_upsample = upsample_cfg is not None
+        self.shortcut_cfg = shortcut_cfg
+        self.with_shortcut = shortcut_cfg is not None
         super(CenterHead, self).__init__(*args, **kwargs)
         self.loss_bbox = build_loss(loss_bbox)
         self.loss_embedding = None
         self.fp16_enabled = False
 
-    def build_upsample(self, cfg):
+    def build_upsample(self, cfg, with_sequential=True):
         in_channels = cfg.pop('in_channels')
+        with_last_bn = cfg.pop('with_last_bn', False)
+        with_last_relu = cfg.pop('with_last_relu', False)
         upsamples = []
         for i in range(len(in_channels) - 1):
             upsamples.append(Upsample2d(
                 in_channels=in_channels[i],
                 out_channels=in_channels[i+1],
-                upsample_cfg=cfg))
-        return nn.Sequential(*upsamples)
+                upsample_cfg=cfg,
+                with_last_bn=with_last_bn,
+                with_last_relu=with_last_relu))
+        return nn.Sequential(*upsamples) if with_sequential else nn.ModuleList(upsamples)
 
-    def build_head(self, feat_channel, out_channel, stacked_convs=1):
+    def build_shortcut(self, cfg):
+        assert len(cfg.in_channels) == len(cfg.out_channels) == len(cfg.levels)
+
+        shortcut_layers = nn.ModuleList()
+        for (in_channel, out_channel, level_ind) in \
+                zip(cfg.in_channels, cfg.out_channels, cfg.levels):
+            assert level_ind > 0
+            layer = ShortcutConv2d(in_channel, out_channel,
+                                   [cfg.kernel_size] * level_ind,
+                                   [cfg.padding] * level_ind)
+            shortcut_layers.append(layer)
+        return shortcut_layers
+
+    def build_head(self, in_channel, feat_channel, stacked_convs, out_channel):
         head_convs = [ConvModule(
-            self.in_channels, feat_channel, 3,
+            in_channel, feat_channel, 3,
             padding=1, bias=True, act_cfg=dict(type='ReLU', inplace=True))]
         for i in range(1, stacked_convs):
             head_convs.append(ConvModule(
@@ -66,13 +81,16 @@ class CenterHead(CornerHead):
         if self.with_upsample:
             self.upsamples = self.build_upsample(self.upsample_cfg)
 
+        if self.with_shortcut:
+            self.shortcuts = self.build_shortcut(self.shortcut_cfg)
+
         # > ct heads
         self.ct_hm_head = self.build_head(
-            self.feat_channels, self.num_classes, self.stacked_convs)
+            self.in_channels, self.feat_channels, self.stacked_convs, self.num_classes)
         self.ct_reg_head = self.build_head(
-            self.feat_channels, 2, self.stacked_convs)
+            self.in_channels, self.feat_channels, self.stacked_convs, 2)
         self.ct_wh_head = self.build_head(
-            self.feat_channels, 2, self.stacked_convs)
+            self.in_channels, self.feat_channels, self.stacked_convs, 2)
 
     def init_weights(self):
         # TOCHECK: cmp w/ centerpose/ttfnet
@@ -243,7 +261,7 @@ class CenterHead(CornerHead):
             box_target: tensor, (batch, 4, h, w) or (batch, 80 * 4, h, w).
             reg_weight: tensor, same as box_target.
         """
-        gt_boxes, _, _, gt_labels = gt_inputs
+        gt_boxes, gt_labels = gt_inputs[0], gt_inputs[3]
         img_shape = img_metas[0]['img_shape'][:2]
         feat_shape = feat_shapes[0]
         with torch.no_grad():
@@ -655,7 +673,9 @@ class Upsample2d(nn.Module):
                      padding=1,
                      output_padding=0,
                      bias=False
-                 )):
+                 ),
+                 with_last_bn=False,
+                 with_last_relu=False):
         super(Upsample2d, self).__init__()
         self.upsample_cfg = upsample_cfg.copy()
         assert self.upsample_cfg.type in [
@@ -690,20 +710,26 @@ class Upsample2d(nn.Module):
                 mode=self.upsample_cfg.type,
                 align_corners=align_corners)
         self.upsample = build_upsample_layer(upsample_cfg_)
-        self.upsample_bn = nn.BatchNorm2d(out_channels)
+        if with_last_bn:
+            self.upsample_bn = nn.BatchNorm2d(out_channels)
         self.relu = nn.ReLU()
+        self.with_last_bn = with_last_bn
+        self.with_last_relu = with_last_relu
         self.init_weights()
 
     def init_weights(self):
-        w = self.upsample.weight.data
-        f = math.ceil(w.size(2) / 2)
-        c = (2 * f - 1 - f % 2) / (2. * f)
-        for i in range(w.size(2)):
-            for j in range(w.size(3)):
-                w[0, 0, i, j] = (1 - math.fabs(i / f - c)) * (1 - math.fabs(j / f - c))
-        for c in range(1, w.size(0)):
-            w[c, 0, :, :] = w[0, 0, :, :]
-
+        # TOCHECK: verify this
+        # w = self.upsample.weight.data
+        # f = math.ceil(w.size(2) / 2)
+        # c = (2 * f - 1 - f % 2) / (2. * f)
+        # for i in range(w.size(2)):
+        #     for j in range(w.size(3)):
+        #         w[0, 0, i, j] = (1 - math.fabs(i / f - c)) * (1 - math.fabs(j / f - c))
+        # for c in range(1, w.size(0)):
+        #     w[c, 0, :, :] = w[0, 0, :, :]
+        for m in self.modules():
+            if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
+                xavier_init(m, distribution='uniform')
         for m in self.modules():
             if isinstance(m, CARAFEPack):
                 m.init_weights()
@@ -713,8 +739,10 @@ class Upsample2d(nn.Module):
         x = self.dcn_bn(x)
         x = self.relu(x)
         x = self.upsample(x)
-        x = self.upsample_bn(x)
-        x = self.relu(x)
+        if self.with_last_bn:
+            x = self.upsample_bn(x)
+        if self.with_last_relu:
+            x = self.relu(x)
         return x
 
 

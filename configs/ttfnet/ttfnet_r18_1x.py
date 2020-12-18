@@ -18,24 +18,29 @@ model = dict(
     neck=None,
     bbox_head=dict(
         type='TTFHead',
-        inplanes=(64, 128, 256, 512),
-        head_conv_channel=128,
-        wh_conv_channel=64,
-        num_hm_convs=2,
-        num_wh_convs=1,
+        in_channels=64,
+        feat_channels=(128, 64),
+        stacked_convs=(2, 1),
         num_classes=80,
         wh_offset_base=16,
-        wh_agnostic=True,
-        wh_gaussian=True,
-        shortcut_cfg=(1, 2, 3),
-        norm_cfg=dict(type='BN'),
-        alpha=0.54,
-        loss_cls=dict(
-            type='CenterFocalLoss',
-            gamma=2.0,
-            loss_weight=1.0),
+        area_cfg=dict(
+            type='log',
+            agnostic=True,
+            gaussian=True,
+            alpha=0.54,
+            beta=0.54
+        ),
+        upsample_cfg=dict(type='bilinear',
+                          in_channels=(512, 256, 128, 64),
+                          with_last_relu=False),
+        shortcut_cfg=dict(in_channels=(256, 128, 64),
+                          out_channels=(256, 128, 64),
+                          kernel_size=3,
+                          padding=1,
+                          levels=(1, 2, 3)),
+        loss_heatmap=dict(
+            type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1),
         loss_bbox=dict(type='CenterGIoULoss', loss_weight=5.0)))
-cudnn_benchmark = True
 # training and testing settings
 train_cfg = dict(
     vis_every_n_iters=100,
@@ -90,5 +95,6 @@ lr_config = dict(
     step=[9, 11])
 checkpoint_config = dict(interval=1)
 # yapf:enable
+cudnn_benchmark = True
 # runtime settings
 total_epochs = 12

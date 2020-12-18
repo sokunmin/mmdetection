@@ -30,7 +30,28 @@ def load_checkpoint(model,
         for k, v in checkpoint['state_dict'].items():
             new_k = k
             if 'bbox_head.' in new_k:
-                new_k = new_k.replace("conv_offset_mask.", "conv_offset.")
+                if 'deconv_layers' in new_k:
+                    new_k = new_k.replace("conv_offset_mask.", "conv_offset.")
+                    new_k = new_k.replace("deconv_layers.", "upsamples.")
+                    if '.0.0.' in new_k:
+                        new_k = new_k.replace(".0.0.", ".0.dcn.")
+                    if '.0.1.' in new_k:
+                        new_k = new_k.replace(".0.1.", ".0.dcn_bn.")
+                    if '.1.0.' in new_k:
+                        new_k = new_k.replace(".1.0.", ".1.dcn.")
+                    if '.1.1.' in new_k:
+                        new_k = new_k.replace(".1.1.", ".1.dcn_bn.")
+                    if '.2.0.' in new_k:
+                        new_k = new_k.replace(".2.0.", ".2.dcn.")
+                    if '.2.1.' in new_k:
+                        new_k = new_k.replace(".2.1.", ".2.dcn_bn.")
+
+                if '.shortcut_layers.' in new_k:
+                    new_k = new_k.replace(".shortcut_layers.", ".shortcuts.")
+                if '.hm.' in new_k:
+                    new_k = new_k.replace(".hm.", ".ct_hm_head.")
+                if '.wh.' in new_k:
+                    new_k = new_k.replace(".wh.", ".ct_wh_head.")
 
             if print_keys:
                 print('> key = ', k, ' -> ', new_k)

@@ -1949,7 +1949,6 @@ class AffineTransform(object):
         affine_scales = ann_info['affine_scales']
         num_obj = len(affine_scales)
         img_width, img_height = self.img_scale
-        ori_shape = results['img'].shape
 
         for i in range(50):
             if num_obj == 0:
