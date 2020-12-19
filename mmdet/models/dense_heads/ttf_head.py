@@ -194,7 +194,7 @@ class TTFHead(CenterHead):
         """
         img_h, img_w = img_metas[0]['pad_shape'][:2]
         feat_h, feat_w = pred_hm.shape[2:]
-        width_ratio = float(img_w / feat_w)  # > 0.25
+        width_ratio = float(img_w / feat_w)  # > 4
         height_ratio = float(img_h / feat_h)
         pred_hm = torch.clamp(pred_hm.sigmoid_(), min=1e-4, max=1 - 1e-4)
         num_pos = hm_target.eq(1).float().sum()
@@ -274,24 +274,24 @@ class TTFHead(CenterHead):
         feat_h, feat_w = feat_shape
         width_ratio = float(feat_w / img_w)  # > 0.25
         height_ratio = float(feat_h / img_h)
-
-        heatmap = gt_boxes.new_zeros((self.num_classes, feat_h, feat_w))  # > (#cls, H, W)
+        num_obj = gt_boxes.size(0)
+        gt_heatmap = gt_boxes.new_zeros((self.num_classes, feat_h, feat_w))  # > (#cls, H, W)
         fake_heatmap = gt_boxes.new_zeros((feat_h, feat_w))  # > (H, W)
-        # > `wh_planes`: 4
+
         box_target = gt_boxes.new_ones((self.wh_channels, feat_h, feat_w)) * -1  # > (4, 128, 128)
         reg_weight = gt_boxes.new_zeros((self.wh_channels // 4, feat_h, feat_w))  # > (1, 128, 128)
 
-        if self.area_cfg.type == 'log':  # <-
-            boxes_areas_log = bbox_areas(gt_boxes).log()  # TOCHECK: why use `log`? See Eq(7)
+        if self.area_cfg.type == 'log':
+            boxes_areas_log = bbox_areas(gt_boxes).log()  # See Eq(7): get `base` for all small and big objects
         elif self.area_cfg.type == 'sqrt':
             boxes_areas_log = bbox_areas(gt_boxes).sqrt()
         else:
             boxes_areas_log = bbox_areas(gt_boxes)
-        boxes_area_topk_log, boxes_ind = torch.topk(boxes_areas_log, boxes_areas_log.size(0))  # sort descending
+        boxes_area_topk_log, boxes_ind = torch.topk(boxes_areas_log, num_obj)  # order: from big to small
 
         if self.area_cfg.type == 'norm':
             boxes_area_topk_log[:] = 1.
-
+        # change order to `big → small`
         gt_boxes = gt_boxes[boxes_ind]
         gt_labels = gt_labels[boxes_ind]
 
@@ -330,35 +330,35 @@ class TTFHead(CenterHead):
             ctr_y1s, ctr_y2s = [torch.clamp(y, max=feat_h - 1) for y in [ctr_y1s, ctr_y2s]]
 
         # larger boxes have lower priority than small boxes.
-        for k in range(boxes_ind.shape[0]):  # > #bbox: large -> small
-            cls_id = gt_labels[k] - 1  # (#obj,) -> scalar
-            alpha_radius = (h_radiuses_alpha[k].item(), w_radiuses_alpha[k].item())
+        for obj_id in range(boxes_ind.shape[0]):  # > #obj: large -> small
+            cls_id = gt_labels[obj_id]
+            alpha_radius = (h_radiuses_alpha[obj_id].item(), w_radiuses_alpha[obj_id].item())
             # > `heatmap`: (#cls, H, W), `ct_ints`: (#obj, 2)
             fake_heatmap = fake_heatmap.zero_()  # (H, W)
-            fake_heatmap = gen_gaussian_target(fake_heatmap, feat_gt_centers_int[k], alpha_radius)
-            heatmap[cls_id] = torch.max(heatmap[cls_id], fake_heatmap)
-            if self.area_cfg.gaussian:  # <-
+            fake_heatmap = gen_gaussian_target(fake_heatmap, feat_gt_centers_int[obj_id], alpha_radius)
+            gt_heatmap[cls_id] = torch.max(gt_heatmap[cls_id], fake_heatmap)
+            if self.area_cfg.gaussian:
                 if self.area_cfg.alpha != self.area_cfg.beta:
-                    beta_radius = (h_radiuses_beta[k].item(), w_radiuses_beta[k].item())
-                    gen_gaussian_target(fake_heatmap, feat_gt_centers_int[k], beta_radius)
-                box_target_inds = fake_heatmap > 0
+                    beta_radius = (h_radiuses_beta[obj_id].item(), w_radiuses_beta[obj_id].item())
+                    gen_gaussian_target(fake_heatmap, feat_gt_centers_int[obj_id], beta_radius)
+                box_target_inds = fake_heatmap > 0  # > (H, W)
             else:
-                ctr_x1, ctr_y1, ctr_x2, ctr_y2 = ctr_x1s[k], ctr_y1s[k], ctr_x2s[k], ctr_y2s[k]
+                ctr_x1, ctr_y1, ctr_x2, ctr_y2 = ctr_x1s[obj_id], ctr_y1s[obj_id], ctr_x2s[obj_id], ctr_y2s[obj_id]
                 box_target_inds = torch.zeros_like(fake_heatmap, dtype=torch.uint8)
                 box_target_inds[ctr_y1:ctr_y2 + 1, ctr_x1:ctr_x2 + 1] = 1
 
             if self.area_cfg.agnostic:  # <-
-                box_target[:, box_target_inds] = gt_boxes[k][:, None]
-                cls_id = 0
+                box_target[:, box_target_inds] = gt_boxes[obj_id][:, None]
+                cls_id = 0  # TOCHECK: why assign `0` here?
             else:
-                box_target[(cls_id * 4):((cls_id + 1) * 4), box_target_inds] = gt_boxes[k][:, None]
+                box_target[(cls_id * 4):((cls_id + 1) * 4), box_target_inds] = gt_boxes[obj_id][:, None]
 
             if self.area_cfg.gaussian:  # <-
                 local_heatmap = fake_heatmap[box_target_inds]
                 ct_div = local_heatmap.sum()
-                local_heatmap *= boxes_area_topk_log[k]
+                local_heatmap *= boxes_area_topk_log[obj_id]
                 reg_weight[cls_id, box_target_inds] = local_heatmap / ct_div
             else:
-                reg_weight[cls_id, box_target_inds] = boxes_area_topk_log[k] / box_target_inds.sum().float()
+                reg_weight[cls_id, box_target_inds] = boxes_area_topk_log[obj_id] / box_target_inds.sum().float()
 
-        return heatmap, box_target, reg_weight
+        return gt_heatmap, box_target, reg_weight

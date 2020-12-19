@@ -68,4 +68,4 @@ def calc_region(bbox, ratio, featmap_size=None):
         y1 = y1.clamp(min=0, max=featmap_size[0])
         x2 = x2.clamp(min=0, max=featmap_size[1])
         y2 = y2.clamp(min=0, max=featmap_size[0])
-    return (x1, y1, x2, y2)
+    return x1, y1, x2, y2
