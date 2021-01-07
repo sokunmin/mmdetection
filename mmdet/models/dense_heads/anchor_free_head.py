@@ -227,7 +227,8 @@ class AnchorFreeHead(BaseDenseHead, BBoxTestMixin):
              gt_bboxes,
              gt_labels,
              img_metas,
-             gt_bboxes_ignore=None):
+             gt_bboxes_ignore=None,
+             **kwargs):
         """Compute loss of the head.
 
         Args:

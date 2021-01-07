@@ -15,7 +15,17 @@ model = dict(
         norm_cfg=dict(type='BN', requires_grad=True),
         norm_eval=True,
         style='pytorch'),
-    neck=None,
+    neck=dict(
+        type='CenterFPN',
+        in_channels=(512, 256, 128, 64),
+        out_channels=64,
+        with_last_norm=False,
+        with_last_relu=False,
+        upsample_cfg=dict(
+            type='bilinear'
+        ),
+        shortcut_convs=(1, 2, 3)
+    ),
     bbox_head=dict(
         type='TTFHead',
         in_channels=64,
@@ -30,14 +40,6 @@ model = dict(
             alpha=0.54,
             beta=0.54
         ),
-        upsample_cfg=dict(type='bilinear',
-                          in_channels=(512, 256, 128, 64),
-                          with_last_relu=False),
-        shortcut_cfg=dict(in_channels=(256, 128, 64),
-                          out_channels=(256, 128, 64),
-                          kernel_size=3,
-                          padding=1,
-                          levels=(1, 2, 3)),
         loss_heatmap=dict(
             type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1),
         loss_bbox=dict(type='CenterGIoULoss', loss_weight=5.0)))

@@ -15,7 +15,11 @@ model = dict(
         channels=[16, 32, 64, 128, 256, 512],
         down_ratio=4,
         last_level=5),
-    neck=None,
+    neck=dict(
+        type='CenterFPN',
+        in_channels=(64, 64, 64),
+        out_channels=64
+    ),
     bbox_head=dict(
         type='CenterHead',
         num_classes=1,
@@ -49,7 +53,8 @@ test_cfg = dict(
     max_per_img=100)
 # dataset settings, SEE: Normalize RGB https://aishack.in/tutorials/normalized-rgb/
 img_norm_cfg = dict(
-    mean=[0.408, 0.447, 0.470], std=[0.289, 0.274, 0.278], to_rgb=False)
+    # NOTE: add `norm_rgb=True` if eval offical pretrained weights
+    mean=[0.408, 0.447, 0.470], std=[0.289, 0.274, 0.278], to_rgb=False, norm_rgb=True)
     # mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], to_rgb=False, norm_rgb=True)
     # mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=False, norm_rgb=True)
 train_pipeline = [
@@ -131,6 +136,6 @@ lr_config = dict(
     warmup_iters=500,
     warmup_ratio=1.0 / 5,
     step=[270, 300])
-checkpoint_config = dict(interval=1)
+checkpoint_config = dict(interval=10)
 # runtime settings
 total_epochs = 320

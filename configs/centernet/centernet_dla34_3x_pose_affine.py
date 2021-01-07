@@ -15,7 +15,11 @@ model = dict(
         channels=[16, 32, 64, 128, 256, 512],
         down_ratio=4,
         last_level=5),
-    neck=None,
+    neck=dict(
+        type='CenterFPN',
+        in_channels=(64, 64, 64),
+        out_channels=64
+    ),
     bbox_head=dict(
         type='CenterHead',
         num_classes=1,

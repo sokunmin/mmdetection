@@ -12,7 +12,7 @@ from mmcv.runner import (get_dist_info, init_dist, load_checkpoint,
                          wrap_fp16_model)
 
 from mmdet.apis import multi_gpu_test, single_gpu_test
-from mmdet.core.evaluation.class_names import get_ckpt_converter
+from mmdet.core.evaluation.class_names import get_ckpt_converter, ckpt_aliases
 from mmdet.datasets import (build_dataloader, build_dataset,
                             replace_ImageToTensor)
 from mmdet.models import build_detector
@@ -83,7 +83,7 @@ def parse_args():
         help='job launcher')
     parser.add_argument(
         '--ckpt-module',
-        choices=['mmcv', 'fcos', 'embedmask', 'simplepose', 'ttfnet', 'centernet', 'centerpose'],
+        choices=ckpt_aliases.keys(),
         default='mmcv',
         help='name of converter')
     parser.add_argument('--local_rank', type=int, default=0)

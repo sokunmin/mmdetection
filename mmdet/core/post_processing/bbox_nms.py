@@ -11,7 +11,8 @@ def multiclass_nms(multi_bboxes,
                    score_thr,
                    nms_cfg,
                    max_num=-1,
-                   score_factors=None):
+                   score_factors=None,
+                   keep_mask=False):
     """NMS for multi-class bboxes.
 
     Args:
@@ -70,6 +71,9 @@ def multiclass_nms(multi_bboxes,
         dets = dets[:max_num]
         keep = keep[:max_num]
 
+    if keep_mask:
+        mask_meta = (valid_mask, keep)
+        return dets, labels[keep], mask_meta
     return dets, labels[keep]
 
 

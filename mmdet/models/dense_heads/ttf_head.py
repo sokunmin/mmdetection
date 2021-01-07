@@ -34,13 +34,6 @@ class TTFHead(CenterHead):
         super(TTFHead, self).__init__(*args, **kwargs)
 
     def _init_layers(self):
-        if self.with_upsample:
-            self.upsamples = self.build_upsample(self.upsample_cfg, with_sequential=False)
-
-        if self.with_shortcut:
-            self.shortcuts = self.build_shortcut(self.shortcut_cfg)
-
-        # heads
         if isinstance(self.stacked_convs, tuple) and isinstance(self.feat_channels, tuple) and \
                 len(self.stacked_convs) == len(self.feat_channels):
             self.ct_hm_head = self.build_head(
@@ -54,11 +47,6 @@ class TTFHead(CenterHead):
                 self.in_channels, self.feat_channels, self.stacked_convs, self.wh_channels)
 
     def init_weights(self):
-        if self.with_shortcut:
-            for _, m in self.shortcuts.named_modules():
-                if isinstance(m, nn.Conv2d):
-                    kaiming_init(m)
-
         for _, m in self.ct_hm_head.named_modules():
             if isinstance(m, nn.Conv2d):
                 normal_init(m, std=0.01)
@@ -68,35 +56,26 @@ class TTFHead(CenterHead):
 
         self._init_head_weights(self.ct_wh_head)
 
-    def forward(self, feats):
+    def forward(self, x):
         """
         Args:
-            feats: list(tensor).
+            x: list(tensor).
         Returns:
             hm: tensor, (batch, 80, h, w).
             wh: tensor, (batch, 4, h, w) or (batch, 80 * 4, h, w).
         """
-        feats = feats[::-1]  # > reverse order
-        x = feats[0]  # > [512, 256, 128, 64]
-        if self.with_shortcut:
-            assert len(self.upsamples) == len(self.shortcuts)
-            for i, upsample, shortcut in \
-                    zip(range(len(self.upsamples)), self.upsamples, self.shortcuts):
-                x = upsample(x)
-                residual = shortcut(feats[i+1])
-                x = x + residual
-
         hm = self.ct_hm_head(x)  # > (64, H, W) -> (128, H, W) -> (#cls, H, W)
-        # > TOCHECK `wh_offset_base`: https://github.com/ZJULearning/ttfnet/issues/17
+        # > SEE: https://github.com/ZJULearning/ttfnet/issues/17
         wh = F.relu(self.ct_wh_head(x)) * self.wh_offset_base  # > (64, H, W) -> (64, H, W) -> (4, H, W)
-
         return hm, wh
 
     def get_bboxes(self,
-                   bbox_outs,
+                   pred_hm,
+                   pred_wh,
                    img_metas,
-                   rescale=False):
-        pred_hm, pred_wh = bbox_outs
+                   rescale=False,
+                   with_nms=True):
+        # pred_hm, pred_wh = bbox_outs
         batch, cls, feat_h, feat_w = pred_hm.size()
         ct_hm = pred_hm.detach().sigmoid_()  # > (#cls, 128, 128)
         ct_wh = pred_wh.detach()
@@ -132,7 +111,8 @@ class TTFHead(CenterHead):
                 clses[img_id],
                 img_metas[img_id],
                 (feat_h, feat_w),
-                rescale
+                rescale=rescale,
+                with_nms=with_nms
             ))
         # > gt_inputs, gt_metas
         return result_list, None
@@ -143,7 +123,8 @@ class TTFHead(CenterHead):
                           labels,
                           img_meta,
                           feat_size,
-                          rescale=False):
+                          rescale=False,
+                          with_nms=True):
         scores_keep = (scores > self.test_cfg.score_thr).squeeze(-1)
 
         scores = scores[scores_keep]  # (topk, 1)

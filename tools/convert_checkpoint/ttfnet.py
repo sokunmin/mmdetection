@@ -32,7 +32,7 @@ def load_checkpoint(model,
             if 'bbox_head.' in new_k:
                 if 'deconv_layers' in new_k:
                     new_k = new_k.replace("conv_offset_mask.", "conv_offset.")
-                    new_k = new_k.replace("deconv_layers.", "upsamples.")
+                    new_k = new_k.replace("bbox_head.deconv_layers.", "neck.upsamples.")
                     if '.0.0.' in new_k:
                         new_k = new_k.replace(".0.0.", ".0.dcn.")
                     if '.0.1.' in new_k:
@@ -47,7 +47,8 @@ def load_checkpoint(model,
                         new_k = new_k.replace(".2.1.", ".2.dcn_bn.")
 
                 if '.shortcut_layers.' in new_k:
-                    new_k = new_k.replace(".shortcut_layers.", ".shortcuts.")
+                    new_k = new_k.replace("bbox_head.shortcut_layers.", "neck.shortcuts.")
+                    new_k = new_k.replace(".layers.", ".")
                 if '.hm.' in new_k:
                     new_k = new_k.replace(".hm.", ".ct_hm_head.")
                 if '.wh.' in new_k:

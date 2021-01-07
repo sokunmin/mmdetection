@@ -1,6 +1,11 @@
 import torch
 import torch.nn as nn
-
+import numpy as np
+import cv2
+import mmcv
+import seaborn as sns
+from mmcv import color_val, imshow
+from mmcv.image import imread, imwrite
 from mmdet.core import bbox2result
 from ..builder import DETECTORS, build_backbone, build_head, build_neck
 from .base import BaseDetector
@@ -25,7 +30,8 @@ class SingleStageMultiDetector(BaseDetector):
                  train_cfg=None,
                  test_cfg=None,
                  pretrained=None,
-                 loss_balance=None):
+                 loss_balance=None,
+                 with_mmdet_head=False):
         super(SingleStageMultiDetector, self).__init__()
         self.backbone = build_backbone(backbone)
         if neck is not None:
@@ -45,6 +51,7 @@ class SingleStageMultiDetector(BaseDetector):
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
         self.with_balance_loss = loss_balance is not None
+        self.with_mmdet_head = with_mmdet_head
         if self.with_balance_loss:
             self.loss_balance = build_loss(loss_balance)
         self.init_weights(pretrained=pretrained)
@@ -88,12 +95,11 @@ class SingleStageMultiDetector(BaseDetector):
         if self.with_bbox:
             x, all_outs = self.bbox_head.preprocess(x, all_outs)
             all_outs['bbox'] = self.bbox_head(x)
-
         if self.with_mask:
-            x, all_outs = self.group_head_inputs(x, all_outs)
+            x, all_outs = self.mask_head.preprocess(x, all_outs)
             all_outs['mask'] = self.mask_head(x)
         if self.with_keypoint:
-            x, all_outs = self.group_head_inputs(x, all_outs)
+            x, all_outs = self.keypoint_head.preprocess(x, all_outs)
             all_outs['keypoint'] = self.keypoint_head(x)
         return all_outs
 
@@ -127,22 +133,34 @@ class SingleStageMultiDetector(BaseDetector):
         """
         x = self.extract_feat(img)
         feat_shapes = [tuple(lvl.size()[2:]) for lvl in x]
+        if gt_masks is not None:
+            gt_masks = [
+                gt_mask.to_tensor(dtype=torch.uint8, device=img.device)
+                for gt_mask in gt_masks
+            ]
         gt_inputs = (gt_bboxes, gt_masks, gt_keypoints, gt_labels)
         all_targets = dict(bbox=None, mask=None, keypoint=None)
         all_target_metas = dict(bbox=None, mask=None, keypoint=None)
         all_preds, all_losses = {}, {}
         if self.with_bbox:
-            x, all_preds = self.bbox_head.preprocess(x, all_preds)
-            all_preds['bbox'] = self.bbox_head(x)
-            all_targets['bbox'], all_target_metas['bbox'] = self.bbox_head.get_targets(
-                gt_inputs, all_target_metas, feat_shapes, img_metas)
-            loss_inputs = self.bbox_head.postprocess(
-                all_preds['bbox'], all_targets, all_target_metas, img_metas, return_loss=True)
-            bbox_losses = self.bbox_head.loss(
-                *loss_inputs,
-                gt_bboxes_ignore=gt_bboxes_ignore,
-                gt_masks_ignore=gt_masks_ignore,
-                gt_keypoints_ignore=gt_keypoints_ignore)
+            if self.with_mmdet_head:
+                all_preds['bbox'] = self.bbox_head(x)
+                bbox_gts = self.bbox_head.preprocess(all_preds, gt_inputs)
+                all_target_metas['bbox'] = self.bbox_head.get_targets(*bbox_gts)
+                bbox_inputs = self.bbox_head.postprocess(all_preds, all_target_metas, return_loss=True)
+                bbox_losses = self.bbox_head.loss(*bbox_inputs, img_metas)
+            else:
+                x, all_preds = self.bbox_head.preprocess(x, all_preds)
+                all_preds['bbox'] = self.bbox_head(x)
+                all_targets['bbox'], all_target_metas['bbox'] = self.bbox_head.get_targets(
+                    gt_inputs, all_target_metas, feat_shapes, img_metas)
+                loss_inputs = self.bbox_head.postprocess(
+                    all_preds['bbox'], all_targets, all_target_metas, img_metas, return_loss=True)
+                bbox_losses = self.bbox_head.loss(
+                    *loss_inputs,
+                    gt_bboxes_ignore=gt_bboxes_ignore,
+                    gt_masks_ignore=gt_masks_ignore,
+                    gt_keypoints_ignore=gt_keypoints_ignore)
             all_losses.update(bbox_losses)
         if self.with_mask:
             x, all_preds = self.mask_head.preprocess(x, all_preds)
@@ -194,11 +212,14 @@ class SingleStageMultiDetector(BaseDetector):
         """
         x = self.extract_feat(img)
         all_preds, all_results = {}, {'bbox': [], 'mask': [], 'keypoint': []}
+        # TOCHECK: move `preprocess`, `feat_process`, `postprocess` out of heads
         if self.with_bbox:
             x, all_preds = self.bbox_head.preprocess(x, all_preds)
             all_preds['bbox'] = self.bbox_head(x)
-            # > (n, [bboxes, labels, ...])
-            bbox_list = self.bbox_head.get_bboxes(*all_preds.values(), img_metas, rescale=rescale)
+            bbox_outs = self.bbox_head.feat_process(*all_preds.values())
+            # only unpack bbox outs in bbox head
+            bbox_list = self.bbox_head.get_bboxes(
+                *bbox_outs[0], img_metas=img_metas, rescale=rescale, with_nms=True)
             all_preds, bbox_list = self.bbox_head.postprocess(all_preds, bbox_list)
             # skip post-processing when exporting to ONNX
             if not torch.onnx.is_in_onnx_export():
@@ -211,15 +232,20 @@ class SingleStageMultiDetector(BaseDetector):
         if self.with_mask:
             x, all_preds = self.mask_head.preprocess(x, all_preds)
             all_preds['mask'] = self.mask_head(x)
-            mask_list = self.mask_head.get_masks(*all_preds.values(), img_metas, rescale=rescale)
+            mask_outs = self.mask_head.feat_process(*all_preds.values())
+            mask_list = self.mask_head.get_masks(
+                *mask_outs, img_metas=img_metas, rescale=rescale, with_nms=True)
             all_preds, mask_list = self.mask_head.postprocess(all_preds, mask_list)
             if not torch.onnx.is_in_onnx_export():
                 # TOCHECK: add `mask2result`
-                all_results['mask'] = None
+                all_results['mask'] = self.mask_head.get_seg_masks(
+                    *mask_list, img_metas=img_metas, rescale=rescale)
         if self.with_keypoint:
             x, all_preds = self.keypoint_head.preprocess(x, all_preds)
             all_preds['keypoint'] = self.keypoint_head(x)
-            keypoint_list = self.keypoint_head.get_keypoints(*all_preds.values(), img_metas, rescale=rescale)
+            keypoint_outs = self.keypoint_head.feat_process(*all_preds.values())
+            keypoint_list = self.keypoint_head.get_keypoints(
+                *keypoint_outs, img_metas=img_metas, rescale=rescale, with_nms=True)
             all_preds, keypoint_list = self.keypoint_head.postprocess(all_preds, keypoint_list)
             if not torch.onnx.is_in_onnx_export():
                 keypoint_results = [
@@ -258,3 +284,113 @@ class SingleStageMultiDetector(BaseDetector):
 
         feats = self.extract_feats(imgs)
         return [self.bbox_head.aug_test(feats, img_metas, rescale=rescale)]
+
+    def show_result(self,
+                    img,
+                    result,
+                    score_thr=0.3,
+                    color_type='Paired',  # > 'hls, husl, Paired, Sets2
+                    num_colors=20,
+                    thickness=1,
+                    font_scale=0.5,
+                    win_name='',
+                    show=False,
+                    wait_time=0,
+                    out_file=None):
+
+        img = mmcv.imread(img)
+        img = img.copy()
+        if isinstance(result, tuple) and len(result) > 1:  # > multi-task
+            if self.with_bbox and self.with_keypoint and not self.with_mask:
+                bbox_result, keypoint_result = result
+                segm_result = None
+            elif self.with_bbox and self.with_mask and not self.with_keypoint:
+                bbox_result, segm_result = result
+                keypoint_result = None
+            else:
+                bbox_result, keypoint_result, segm_result = result
+        else:
+            bbox_result, keypoint_result, segm_result = result, None, None
+        bboxes = np.vstack(bbox_result)
+        bbox_keep = bboxes[:, -1] > score_thr
+        num_objs = bbox_keep.sum()
+        colors = (np.array(sns.color_palette(color_type, num_colors)) * 255).astype(np.uint16).tolist()  # 12 *
+        num_colors = len(colors)
+        if num_objs == 0:
+            return img
+        labels = [
+            np.full(bbox.shape[0], i, dtype=np.int32)
+            for i, bbox in enumerate(bbox_result)
+        ]
+        labels = np.concatenate(labels)
+        # draw segmentation masks
+        if segm_result is not None and len(labels) > 0:  # non empty
+            segms = mmcv.concat_list(segm_result)
+            inds = np.where(bboxes[:, -1] > score_thr)[0]
+            np.random.seed(42)
+            color_masks = [
+                np.random.randint(0, 256, (1, 3), dtype=np.uint8)
+                for _ in range(max(labels) + 1)
+            ]
+            for i in inds:
+                i = int(i)
+                color_mask = color_masks[labels[i]]
+                mask = segms[i].astype(bool)
+                img[mask] = img[mask] * 0.5 + color_mask * 0.5
+
+        if keypoint_result is not None:
+            num_joints = self.keypoint_head.num_classes
+            keypoints = np.vstack(keypoint_result)  # (B, K, ((xyv) * #kp + bbox_score)
+            kp_shape = keypoints.shape
+            joints = keypoints[bbox_keep, :-1].reshape(num_objs, kp_shape[1] // 3, 3).astype(dtype=np.int32)
+            limbs = self.keypoint_head.limbs
+            for i, joint in zip(range(num_objs), joints):  # > #objs
+                color = colors[i % num_colors]
+                for l, limb_ind in enumerate(limbs):  # `limbs`: (#kp, 2)
+                    if all(joint[limb_ind, 2] > 0.):  # joints on a limb are above
+                        src_pt = tuple(joint[limb_ind, :2][0])
+                        dst_pt = tuple(joint[limb_ind, :2][1])
+                        cv2.line(img, src_pt, dst_pt, color, thickness=2, lineType=cv2.LINE_AA)
+
+                for j in range(num_joints):
+                    if joint[j][2] > 0.:
+                        cv2.circle(img, (joint[j, 0], joint[j, 1]), 2, mmcv.color_val('white'),
+                                   thickness=cv2.FILLED, lineType=cv2.LINE_AA)
+
+        # if out_file specified, do not show image in window
+        if out_file is not None:
+            show = False
+        # draw bounding boxes
+        assert bboxes.ndim == 2
+        assert labels.ndim == 1
+        assert bboxes.shape[0] == labels.shape[0]
+        assert bboxes.shape[1] == 4 or bboxes.shape[1] == 5
+        img = imread(img)
+
+        if score_thr > 0:
+            assert bboxes.shape[1] == 5
+            scores = bboxes[:, -1]
+            inds = scores > score_thr
+            bboxes = bboxes[inds, :]
+            labels = labels[inds]
+
+        img = np.ascontiguousarray(img)
+        for i, bbox, label in zip(range(num_objs), bboxes, labels):
+            color = colors[i % num_colors]
+            bbox_int = bbox.astype(np.int32)
+            left_top = (bbox_int[0], bbox_int[1])
+            right_bottom = (bbox_int[2], bbox_int[3])
+            cv2.rectangle(img, left_top, right_bottom, color, thickness=thickness)
+            label_text = self.CLASSES[label] if self.CLASSES is not None else f'cls {label}'
+            if len(bbox) > 4:
+                label_text += f'|{bbox[-1]:.02f}'
+            cv2.putText(img, label_text, (bbox_int[0], bbox_int[1] - 2),
+                        cv2.FONT_HERSHEY_COMPLEX, font_scale, color)
+
+        if show:
+            imshow(img, win_name, wait_time)
+        if out_file is not None:
+            imwrite(img, out_file)
+
+        if not (show or out_file):
+            return img

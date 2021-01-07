@@ -1,9 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mmcv.cnn import normal_init, kaiming_init, build_upsample_layer, build_norm_layer, xavier_init
+from mmcv.cnn import normal_init
 from mmcv.cnn import ConvModule, bias_init_with_prob
-from mmcv.ops import ModulatedDeformConv2dPack, CARAFEPack
 from mmcv.runner import force_fp32
 import numpy as np
 import math
@@ -21,48 +20,15 @@ class CenterHead(CornerHead):
                  stacked_convs=1,
                  feat_channels=256,
                  max_objs=128,
-                 upsample_cfg=None,
-                 shortcut_cfg=None,
                  loss_bbox=dict(type='L1Loss', loss_weight=0.1),
                  **kwargs):
         self.max_objs = max_objs
         self.stacked_convs = stacked_convs
         self.feat_channels = feat_channels
-        self.upsample_cfg = upsample_cfg
-        self.with_upsample = upsample_cfg is not None
-        self.shortcut_cfg = shortcut_cfg
-        self.with_shortcut = shortcut_cfg is not None
         super(CenterHead, self).__init__(*args, **kwargs)
         self.loss_bbox = build_loss(loss_bbox)
         self.loss_embedding = None
         self.fp16_enabled = False
-
-    def build_upsample(self, cfg, with_sequential=True):
-        in_channels = cfg.pop('in_channels')
-        with_last_bn = cfg.pop('with_last_bn', False)
-        with_last_relu = cfg.pop('with_last_relu', False)
-        upsamples = []
-        for i in range(len(in_channels) - 1):
-            upsamples.append(Upsample2d(
-                in_channels=in_channels[i],
-                out_channels=in_channels[i+1],
-                upsample_cfg=cfg,
-                with_last_bn=with_last_bn,
-                with_last_relu=with_last_relu))
-        return nn.Sequential(*upsamples) if with_sequential else nn.ModuleList(upsamples)
-
-    def build_shortcut(self, cfg):
-        assert len(cfg.in_channels) == len(cfg.out_channels) == len(cfg.levels)
-
-        shortcut_layers = nn.ModuleList()
-        for (in_channel, out_channel, level_ind) in \
-                zip(cfg.in_channels, cfg.out_channels, cfg.levels):
-            assert level_ind > 0
-            layer = ShortcutConv2d(in_channel, out_channel,
-                                   [cfg.kernel_size] * level_ind,
-                                   [cfg.padding] * level_ind)
-            shortcut_layers.append(layer)
-        return shortcut_layers
 
     def build_head(self, in_channel, feat_channel, stacked_convs, out_channel):
         head_convs = [ConvModule(
@@ -77,14 +43,6 @@ class CenterHead(CornerHead):
         return nn.Sequential(*head_convs)
 
     def _init_layers(self):
-        # > upsample
-        if self.with_upsample:
-            self.upsamples = self.build_upsample(self.upsample_cfg)
-
-        if self.with_shortcut:
-            self.shortcuts = self.build_shortcut(self.shortcut_cfg)
-
-        # > ct heads
         self.ct_hm_head = self.build_head(
             self.in_channels, self.feat_channels, self.stacked_convs, self.num_classes)
         self.ct_reg_head = self.build_head(
@@ -93,7 +51,6 @@ class CenterHead(CornerHead):
             self.in_channels, self.feat_channels, self.stacked_convs, 2)
 
     def init_weights(self):
-        # TOCHECK: cmp w/ centerpose/ttfnet
         for _, m in self.ct_hm_head.named_modules():
             if isinstance(m, nn.Conv2d):
                 normal_init(m, std=0.001)
@@ -108,7 +65,7 @@ class CenterHead(CornerHead):
             if isinstance(m, nn.Conv2d):
                 normal_init(m, std=0.001)
 
-    def forward(self, feats):
+    def forward(self, x):
         """
         Args:
             feats: list(tensor).
@@ -116,19 +73,16 @@ class CenterHead(CornerHead):
             hm: tensor, (batch, 80, h, w).
             wh: tensor, (batch, 4, h, w) or (batch, 80 * 4, h, w).
         """
-        x = feats[-1]  # (B, 512, H, W)
-        if self.with_upsample:
-            x = self.upsamples(x)  # (B, 64, H, W)
         ct_hm = self.ct_hm_head(x)  # > (B, #cls, 128, 128)
         ct_offset = self.ct_reg_head(x)  # > (B, 2, 128, 128)
         ct_wh = self.ct_wh_head(x)  # > (B, 2, 128, 128)
         return ct_hm, ct_offset, ct_wh
 
     def get_bboxes(self,
-                   bbox_outs,
+                   pred_ct_cls, pred_ct_offset, pred_ct_wh,
                    img_metas,
-                   rescale=False):
-        pred_ct_cls, pred_ct_offset, pred_ct_wh = bbox_outs
+                   rescale=False,
+                   with_nms=True):
         batch, cls, feat_h, feat_w = pred_ct_cls.size()
         # `ct`: #cls, `ct_offset`: 2, `ct_wh`: 2
         ct_cls = pred_ct_cls.detach().sigmoid_()  # > (#cls, H, W)
@@ -170,7 +124,8 @@ class CenterHead(CornerHead):
                 clses[img_id],
                 img_metas[img_id],
                 (feat_h, feat_w),
-                rescale
+                rescale=rescale,
+                with_nms=with_nms
             ))
         return result_list, (scores, feat_bboxes, ct_inds, ct_xs, ct_ys)
 
@@ -180,7 +135,8 @@ class CenterHead(CornerHead):
                           labels,
                           img_meta,
                           feat_size,
-                          rescale=False):
+                          rescale=False,
+                          with_nms=True):
         # `bboxes`: (B, K, 4), `bbox_scores`: (B, K, 1)
         pad_h, pad_w = img_meta['pad_shape'][:2]
         width_ratio = float(feat_size[1] / pad_w)
@@ -192,6 +148,7 @@ class CenterHead(CornerHead):
             bboxes /= bboxes.new_tensor(scale_factor)
         bboxes = torch.cat([bboxes, scores], dim=1)  # (K, 4 + 1)
         labels = labels.squeeze(-1)  # (K, 1) -> (K,)
+        # TOCHECK: `self._bboxes_nms` in `Cornerhead`
         return bboxes, labels
 
     def postprocess(self, *inputs, return_loss=False):
@@ -382,7 +339,6 @@ class CenterPoseHead(CornerHead):
     def init_weights(self):
         bias_cls = bias_init_with_prob(0.1)
         normal_init(self.kp_hm_head[-1], std=0.01, bias=bias_cls)
-        # TOCHECK: cmp w/ centerpose/ttfnet
         self._init_head_weights(self.ct_kp_reg_head)
         self._init_head_weights(self.kp_reg_head)
 
@@ -391,8 +347,8 @@ class CenterPoseHead(CornerHead):
             if isinstance(m, nn.Conv2d):
                 normal_init(m, std=0.001)
 
-    def forward(self, feats):
-        x = feats[-1]  # (64, H, W)
+    def forward(self, x):
+        # x = feats[-1]  # (64, H, W)
         kp_hm = self.kp_hm_head(x)
         kp_reg = self.kp_reg_head(x)
         ct_kp_reg = self.ct_kp_reg_head(x)
@@ -402,8 +358,8 @@ class CenterPoseHead(CornerHead):
                       bbox_outs,
                       keypoint_outs,
                       img_metas,
-                      rescale=False):
-        pred_ct_hm, pred_ct_reg, pred_ct_wh, \
+                      rescale=False,
+                      with_nms=True):
         bbox_scores, feat_bboxes, ct_inds, ct_xs, ct_ys = bbox_outs
         pred_kp_hm, pred_kp_reg, pred_ct_kp_reg = keypoint_outs
         batch, _, feat_h, feat_w = pred_kp_hm.size()
@@ -474,7 +430,8 @@ class CenterPoseHead(CornerHead):
                 bbox_scores[img_id],
                 img_metas[img_id],
                 (feat_h, feat_w),
-                rescale=rescale
+                rescale=rescale,
+                with_nms=True
             ))
         return result_list
 
@@ -484,7 +441,8 @@ class CenterPoseHead(CornerHead):
                              bbox_scores,
                              img_meta,
                              feat_size,
-                             rescale=False):
+                             rescale=False,
+                             with_nms=True):
         pad_h, pad_w = img_meta['pad_shape'][:2]
         num_topk = self.test_cfg.max_per_img
         width_ratio = float(feat_size[1] / pad_w)
@@ -513,6 +471,10 @@ class CenterPoseHead(CornerHead):
         topk_xs = (topk_inds % width).float()  # (B, #cls, topk)
 
         return topk_scores, topk_inds, topk_ys, topk_xs
+
+    def feat_process(self, bbox_outs, keypoint_outs, return_loss=False):
+        new_bbox_outs = bbox_outs[3:]
+        return new_bbox_outs, keypoint_outs
 
     def postprocess(self, *inputs, return_loss=False):
         if return_loss:
@@ -659,113 +621,3 @@ class CenterPoseHead(CornerHead):
                                                                    center=joint_xy_int,
                                                                    radius=int(radius))
         return gt_heatmap, gt_reg, gt_ct2kps, gt_reg_inds, gt_reg_mask, gt_ct2kps_mask
-
-
-class Upsample2d(nn.Module):
-
-    def __init__(self,
-                 in_channels,
-                 out_channels,
-                 upsample_cfg=dict(
-                     type='deconv',
-                     kernel_size=4,
-                     stride=2,
-                     padding=1,
-                     output_padding=0,
-                     bias=False
-                 ),
-                 with_last_bn=False,
-                 with_last_relu=False):
-        super(Upsample2d, self).__init__()
-        self.upsample_cfg = upsample_cfg.copy()
-        assert self.upsample_cfg.type in [
-            'nearest', 'bilinear', 'deconv', 'pixel_shuffle', 'carafe', None
-        ]
-        self.dcn = ModulatedDeformConv2dPack(in_channels, out_channels, 3, stride=1,
-                                             padding=1, dilation=1, deformable_groups=1)
-        self.dcn_bn = nn.BatchNorm2d(out_channels)
-        upsample_cfg_ = self.upsample_cfg.copy()
-        if self.upsample_cfg.type == 'deconv':
-            upsample_cfg_.update(
-                in_channels=out_channels,
-                out_channels=out_channels,
-                kernel_size=self.upsample_cfg.kernel_size,
-                stride=self.upsample_cfg.stride,
-                padding=self.upsample_cfg.padding,
-                output_padding=self.upsample_cfg.output_padding,
-                bias=self.upsample_cfg.bias)
-        elif self.upsample_cfg.type == 'pixel_shuffle':
-            upsample_cfg_.update(
-                in_channels=out_channels,
-                out_channels=out_channels,
-                scale_factor=2,
-                upsample_kernel=self.upsample_kernel)
-        elif self.upsample_cfg.type == 'carafe':
-            upsample_cfg_.update(channels=out_channels, scale_factor=2)
-        else:
-            # suppress warnings
-            align_corners = (None if self.upsample_cfg.type == 'nearest' else False)
-            upsample_cfg_.update(
-                scale_factor=2,
-                mode=self.upsample_cfg.type,
-                align_corners=align_corners)
-        self.upsample = build_upsample_layer(upsample_cfg_)
-        if with_last_bn:
-            self.upsample_bn = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU()
-        self.with_last_bn = with_last_bn
-        self.with_last_relu = with_last_relu
-        self.init_weights()
-
-    def init_weights(self):
-        # TOCHECK: verify this
-        # w = self.upsample.weight.data
-        # f = math.ceil(w.size(2) / 2)
-        # c = (2 * f - 1 - f % 2) / (2. * f)
-        # for i in range(w.size(2)):
-        #     for j in range(w.size(3)):
-        #         w[0, 0, i, j] = (1 - math.fabs(i / f - c)) * (1 - math.fabs(j / f - c))
-        # for c in range(1, w.size(0)):
-        #     w[c, 0, :, :] = w[0, 0, :, :]
-        for m in self.modules():
-            if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
-                xavier_init(m, distribution='uniform')
-        for m in self.modules():
-            if isinstance(m, CARAFEPack):
-                m.init_weights()
-
-    def forward(self, x):
-        x = self.dcn(x)
-        x = self.dcn_bn(x)
-        x = self.relu(x)
-        x = self.upsample(x)
-        if self.with_last_bn:
-            x = self.upsample_bn(x)
-        if self.with_last_relu:
-            x = self.relu(x)
-        return x
-
-
-class ShortcutConv2d(nn.Module):
-
-    def __init__(self,
-                 in_channels,
-                 out_channels,
-                 kernel_sizes,
-                 paddings,
-                 activation_last=False):
-        super(ShortcutConv2d, self).__init__()
-        assert len(kernel_sizes) == len(paddings)
-
-        layers = []
-        for i, (kernel_size, padding) in enumerate(zip(kernel_sizes, paddings)):
-            inc = in_channels if i == 0 else out_channels
-            layers.append(nn.Conv2d(inc, out_channels, kernel_size, padding=padding))
-            if i < len(kernel_sizes) - 1 or activation_last:
-                layers.append(nn.ReLU(inplace=True))
-
-        self.layers = nn.Sequential(*layers)
-
-    def forward(self, x):
-        y = self.layers(x)
-        return y

@@ -34,5 +34,6 @@ __all__ = [
     'FreeAnchorRetinaHead', 'ATSSHead', 'FSAFHead', 'NASFCOSHead',
     'PISARetinaHead', 'PISASSDHead', 'GFLHead', 'CornerHead', 'YOLACTHead',
     'YOLACTSegmHead', 'YOLACTProtonet', 'YOLOV3Head', 'PAAHead',
-    'SABLRetinaHead', 'CentripetalHead', 'VFNetHead', 'TTFHead', 'CenterPoseHead'
+    'SABLRetinaHead', 'CentripetalHead', 'VFNetHead',
+    'TTFHead', 'CenterPoseHead'
 ]

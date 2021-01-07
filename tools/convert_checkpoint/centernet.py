@@ -45,23 +45,22 @@ def load_checkpoint(model,
             if 'stage4.' in new_k:
                 new_k = new_k.replace("stage4.", "layer4.")
             if 'upsample.deconv' in new_k:
-                new_k = new_k.replace("upsample.", "bbox_head.")
+                new_k = new_k.replace("upsample.", "neck.upsamples.")
                 if 'deconv1' in new_k:
-                    new_k = new_k.replace("deconv1.", "upsamples.0.")
+                    new_k = new_k.replace("deconv1.", "0.")
                 if 'deconv2' in new_k:
-                    new_k = new_k.replace("deconv2.", "upsamples.1.")
+                    new_k = new_k.replace("deconv2.", "1.")
                 if 'deconv3' in new_k:
-                    new_k = new_k.replace("deconv3.", "upsamples.2.")
+                    new_k = new_k.replace("deconv3.", "2.")
                 if 'offset_mask_conv.' in new_k:
                     new_k = new_k.replace("offset_mask_conv.", "conv_offset.")
                 if 'dcnv2.' in new_k:
                     new_k = new_k.replace("dcnv2.", "")
+                if '.up_sample.' in new_k:
+                    new_k = new_k.replace(".up_sample.", ".upsample.")
+                elif '.up_bn.' in new_k:
+                    new_k = new_k.replace(".up_bn.", ".upsample_bn.")
             if 'head.' in new_k:
-                if 'bbox_head.upsamples' in new_k:
-                    if '.up_sample.' in new_k:
-                        new_k = new_k.replace(".up_sample.", ".upsample.")
-                    elif '.up_bn.' in new_k:
-                        new_k = new_k.replace(".up_bn.", ".upsample_bn.")
                 if 'head.cls_head.feat_conv' in new_k:
                     new_k = new_k.replace("head.cls_head.feat_conv", "bbox_head.ct_hm_head.0.conv")
                 if 'head.cls_head.out_conv' in new_k:
