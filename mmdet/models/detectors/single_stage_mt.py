@@ -30,8 +30,7 @@ class SingleStageMultiDetector(BaseDetector):
                  train_cfg=None,
                  test_cfg=None,
                  pretrained=None,
-                 loss_balance=None,
-                 with_mmdet_head=False):
+                 loss_balance=None):
         super(SingleStageMultiDetector, self).__init__()
         self.backbone = build_backbone(backbone)
         if neck is not None:
@@ -51,7 +50,6 @@ class SingleStageMultiDetector(BaseDetector):
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
         self.with_balance_loss = loss_balance is not None
-        self.with_mmdet_head = with_mmdet_head
         if self.with_balance_loss:
             self.loss_balance = build_loss(loss_balance)
         self.init_weights(pretrained=pretrained)
@@ -132,7 +130,10 @@ class SingleStageMultiDetector(BaseDetector):
             dict[str, Tensor]: A dictionary of loss components.
         """
         x = self.extract_feat(img)
-        feat_shapes = [tuple(lvl.size()[2:]) for lvl in x]
+        if isinstance(x, tuple):
+            feat_shapes = [tuple(lvl.size()[2:]) for lvl in x]
+        else:
+            feat_shapes = [tuple(x.size()[2:])]
         if gt_masks is not None:
             gt_masks = [
                 gt_mask.to_tensor(dtype=torch.uint8, device=img.device)
@@ -140,50 +141,52 @@ class SingleStageMultiDetector(BaseDetector):
             ]
         gt_inputs = (gt_bboxes, gt_masks, gt_keypoints, gt_labels)
         all_targets = dict(bbox=None, mask=None, keypoint=None)
-        all_target_metas = dict(bbox=None, mask=None, keypoint=None)
+        all_metas = dict(bbox=None, mask=None, keypoint=None)
         all_preds, all_losses = {}, {}
         if self.with_bbox:
-            if self.with_mmdet_head:
-                all_preds['bbox'] = self.bbox_head(x)
-                bbox_gts = self.bbox_head.preprocess(all_preds, gt_inputs)
-                all_target_metas['bbox'] = self.bbox_head.get_targets(*bbox_gts)
-                bbox_inputs = self.bbox_head.postprocess(all_preds, all_target_metas, return_loss=True)
-                bbox_losses = self.bbox_head.loss(*bbox_inputs, img_metas)
-            else:
-                x, all_preds = self.bbox_head.preprocess(x, all_preds)
-                all_preds['bbox'] = self.bbox_head(x)
-                all_targets['bbox'], all_target_metas['bbox'] = self.bbox_head.get_targets(
-                    gt_inputs, all_target_metas, feat_shapes, img_metas)
-                loss_inputs = self.bbox_head.postprocess(
-                    all_preds['bbox'], all_targets, all_target_metas, img_metas, return_loss=True)
-                bbox_losses = self.bbox_head.loss(
-                    *loss_inputs,
-                    gt_bboxes_ignore=gt_bboxes_ignore,
-                    gt_masks_ignore=gt_masks_ignore,
-                    gt_keypoints_ignore=gt_keypoints_ignore)
+            x, all_preds = self.bbox_head.preprocess(x, all_preds, return_loss=True)
+            all_preds['bbox'] = self.bbox_head(x)
+            bbox_gts = self.bbox_head.interprocess(
+                all_preds, gt_inputs, all_metas, return_loss=True)
+            all_targets['bbox'], all_metas['bbox'] = self.bbox_head.get_targets(
+                *bbox_gts, feat_shapes=feat_shapes, img_metas=img_metas)
+            loss_inputs = self.bbox_head.postprocess(
+                all_preds['bbox'], all_targets, all_metas, return_loss=True)
+            bbox_losses = self.bbox_head.loss(
+                *loss_inputs,
+                img_metas=img_metas,
+                gt_bboxes_ignore=gt_bboxes_ignore,
+                gt_masks_ignore=gt_masks_ignore,
+                gt_keypoints_ignore=gt_keypoints_ignore)
             all_losses.update(bbox_losses)
         if self.with_mask:
-            x, all_preds = self.mask_head.preprocess(x, all_preds)
+            x, all_preds = self.mask_head.preprocess(x, all_preds, return_loss=True)
             all_preds['mask'] = self.mask_head(x)
-            all_targets['mask'], all_target_metas['mask'] = self.mask_head.get_targets(
-                gt_inputs, all_target_metas, feat_shapes, img_metas)
+            mask_gts = self.mask_head.interprocess(
+                all_preds, gt_inputs, all_metas, return_loss=True)
+            all_targets['mask'], all_metas['mask'] = self.mask_head.get_targets(
+                *mask_gts, feat_shapes=feat_shapes, img_metas=img_metas)
             loss_inputs = self.mask_head.postprocess(
-                all_preds['mask'], all_targets, all_target_metas, img_metas, return_loss=True)
+                all_preds['mask'], all_targets, all_metas, return_loss=True)
             mask_losses = self.mask_head.loss(
                 *loss_inputs,
+                img_metas=img_metas,
                 gt_bboxes_ignore=gt_bboxes_ignore,
                 gt_masks_ignore=gt_masks_ignore,
                 gt_keypoints_ignore=gt_keypoints_ignore)
             all_losses.update(mask_losses)
         if self.with_keypoint:
-            x, all_preds = self.keypoint_head.preprocess(x, all_preds)
+            x, all_preds = self.keypoint_head.preprocess(x, all_preds, return_loss=True)
             all_preds['keypoint'] = self.keypoint_head(x)
-            all_targets['keypoint'], all_target_metas['keypoint'] = self.keypoint_head.get_targets(
-                gt_inputs, all_target_metas, feat_shapes, img_metas)
+            keypoint_gts = self.keypoint_head.interprocess(
+                all_preds, gt_inputs, all_metas, return_loss=True)
+            all_targets['keypoint'], all_metas['keypoint'] = self.keypoint_head.get_targets(
+                *keypoint_gts, feat_shapes=feat_shapes, img_metas=img_metas)
             loss_inputs = self.keypoint_head.postprocess(
-                all_preds['keypoint'], all_targets, all_target_metas, img_metas, return_loss=True)
+                all_preds['keypoint'], all_targets, all_metas, return_loss=True)
             keypoint_losses = self.keypoint_head.loss(
                 *loss_inputs,
+                img_metas=img_metas,
                 gt_bboxes_ignore=gt_bboxes_ignore,
                 gt_masks_ignore=gt_masks_ignore,
                 gt_keypoints_ignore=gt_keypoints_ignore)
@@ -211,46 +214,49 @@ class SingleStageMultiDetector(BaseDetector):
                 corresponds to each class.
         """
         x = self.extract_feat(img)
-        all_preds, all_results = {}, {'bbox': [], 'mask': [], 'keypoint': []}
-        # TOCHECK: move `preprocess`, `feat_process`, `postprocess` out of heads
+        all_preds = {}
+        all_metas = dict(bbox=None, mask=None, keypoint=None)
+        all_results = dict(bbox=[], mask=[], keypoint=[])
         if self.with_bbox:
             x, all_preds = self.bbox_head.preprocess(x, all_preds)
             all_preds['bbox'] = self.bbox_head(x)
-            bbox_outs = self.bbox_head.feat_process(*all_preds.values())
-            # only unpack bbox outs in bbox head
-            bbox_list = self.bbox_head.get_bboxes(
-                *bbox_outs[0], img_metas=img_metas, rescale=rescale, with_nms=True)
-            all_preds, bbox_list = self.bbox_head.postprocess(all_preds, bbox_list)
+            bbox_outs = self.bbox_head.interprocess(all_preds, all_metas)
+            bbox_dets, all_metas['bbox'] = self.bbox_head.get_bboxes(
+                *bbox_outs, img_metas=img_metas, rescale=rescale, with_nms=True)
+            all_preds, all_metas, bbox_dets = self.bbox_head.postprocess(
+                all_preds, all_metas, bbox_dets)
             # skip post-processing when exporting to ONNX
             if not torch.onnx.is_in_onnx_export():
                 bbox_results = [
                     # convert detection results to a list of numpy arrays.
                     bbox2result(det_bboxes, det_labels, self.bbox_head.num_classes)
-                    for det_bboxes, det_labels in bbox_list
+                    for det_bboxes, det_labels in bbox_dets
                 ]
                 all_results['bbox'] = bbox_results
         if self.with_mask:
             x, all_preds = self.mask_head.preprocess(x, all_preds)
             all_preds['mask'] = self.mask_head(x)
-            mask_outs = self.mask_head.feat_process(*all_preds.values())
-            mask_list = self.mask_head.get_masks(
+            mask_outs = self.mask_head.interprocess(all_preds, all_metas)
+            mask_dets, all_metas['mask'] = self.mask_head.get_masks(
                 *mask_outs, img_metas=img_metas, rescale=rescale, with_nms=True)
-            all_preds, mask_list = self.mask_head.postprocess(all_preds, mask_list)
+            all_preds, all_metas, mask_dets = self.mask_head.postprocess(
+                all_preds, all_metas, mask_dets)
             if not torch.onnx.is_in_onnx_export():
                 # TOCHECK: add `mask2result`
                 all_results['mask'] = self.mask_head.get_seg_masks(
-                    *mask_list, img_metas=img_metas, rescale=rescale)
+                    *mask_dets, img_metas=img_metas, rescale=rescale)
         if self.with_keypoint:
             x, all_preds = self.keypoint_head.preprocess(x, all_preds)
             all_preds['keypoint'] = self.keypoint_head(x)
-            keypoint_outs = self.keypoint_head.feat_process(*all_preds.values())
-            keypoint_list = self.keypoint_head.get_keypoints(
+            keypoint_outs = self.keypoint_head.interprocess(all_preds, all_metas)
+            keypoint_dets, all_metas['keypoint'] = self.keypoint_head.get_keypoints(
                 *keypoint_outs, img_metas=img_metas, rescale=rescale, with_nms=True)
-            all_preds, keypoint_list = self.keypoint_head.postprocess(all_preds, keypoint_list)
+            all_preds, all_metas, keypoint_dets = self.keypoint_head.postprocess(
+                all_preds, all_metas, keypoint_dets)
             if not torch.onnx.is_in_onnx_export():
                 keypoint_results = [
                     keypoint2result(keypoints, self.keypoint_head.num_classes)
-                    for keypoints in keypoint_list
+                    for keypoints in keypoint_dets
                 ]
                 all_results['keypoint'] = keypoint_results
         # > remove empty key/values

@@ -140,8 +140,7 @@ data = dict(
         img_prefix=data_root + 'val2017/',
         pipeline=test_pipeline))
 # optimizer
-optimizer = dict(type='SGD', lr=0.001, momentum=0.9, weight_decay=0.0004,
-                 paramwise_cfg=dict(bias_lr_mult=2., bias_decay_mult=0.))
+optimizer = dict(type='Adam', lr=0.001)
 optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 # learning policy
 lr_config = dict(
@@ -151,5 +150,7 @@ lr_config = dict(
     warmup_ratio=1.0 / 5,
     step=[270, 300])
 checkpoint_config = dict(interval=10)
+evaluation = dict(interval=1, metric=['bbox', 'keypoints'], multitask=True)
 # runtime settings
 total_epochs = 320
+find_unused_parameters=True

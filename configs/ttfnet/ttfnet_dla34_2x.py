@@ -18,7 +18,7 @@ model = dict(
         in_channels=64,
         stacked_convs=(2, 1),
         num_classes=80,
-        wh_offset_base=16,
+        offset_base=16,
         area_cfg=dict(
             type='log',
             agnostic=True,
@@ -86,4 +86,4 @@ checkpoint_config = dict(interval=1)
 # runtime settings
 total_epochs = 24
 cudnn_benchmark = True
-evaluation = dict(metric=['bbox', 'keypoints'])
+evaluation = dict(metric='bbox')

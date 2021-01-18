@@ -55,8 +55,8 @@ test_cfg = dict(
 # dataset settings
 img_norm_cfg = dict(
     # > NOTE: eval offical pretrained weights only
-    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], to_rgb=True, norm_rgb=True)
-    # mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
+    # mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], to_rgb=True, norm_rgb=True)
+    mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 train_pipeline = [
     dict(type='LoadImageFromFile', to_float32=True),
     dict(type='LoadAnnotations', with_bbox=True),
@@ -113,7 +113,7 @@ optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 lr_config = dict(
     policy='step',
     warmup='linear',
-    waratemup_iters=1000,
+    warmup_iters=1000,
     warmup_ratio=1.0 / 5,
     step=[90, 120])
 checkpoint_config = dict(interval=1)

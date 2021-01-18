@@ -1,21 +1,9 @@
-import itertools
-import logging
-import os.path as osp
-import tempfile
-from enum import Enum
-
-import mmcv
 import numpy as np
-from mmcv.utils import print_log
+import pycocotools.mask as maskUtils
 from pycocotools.coco import COCO
-from pycocotools.cocoeval import COCOeval
-from terminaltables import AsciiTable
 
-from mmdet.core import eval_recalls
 from . import CocoDataset
 from .builder import DATASETS
-from mmcv.utils import print_log
-import pycocotools.mask as maskUtils
 from ..core.bbox.transforms import mask2polybox
 
 try:
@@ -249,7 +237,4 @@ class CocoPersonDataset(CocoDataset):
             ann_info[0]['num_keypoints'] = (np.array(new_keypoints)[2::3] > 0).sum()
             ann_info[0]['area'] = maskUtils.area(new_mask)
             del ann_info[1]
-
-        if '000000223714' in img_name:
-            print()
         return ann_info

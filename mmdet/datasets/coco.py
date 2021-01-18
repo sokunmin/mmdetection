@@ -374,7 +374,7 @@ class CocoDataset(CustomDataset):
         ar = recalls.mean(axis=1)
         return ar
 
-    def format_results(self, results, jsonfile_prefix=None, metrics=['bbox'], **kwargs):
+    def format_results(self, results, jsonfile_prefix=None, metrics=['bbox'], multitask=False, **kwargs):
         """Format the results to json (standard format for COCO evaluation).
 
         Args:
@@ -399,7 +399,7 @@ class CocoDataset(CustomDataset):
             jsonfile_prefix = osp.join(tmp_dir.name, 'results')
         else:
             tmp_dir = None
-        if len(metrics) == 1:
+        if not multitask:
             result_files = self.results2json(results, jsonfile_prefix)
         else:
             result_files = self.multiresults2json(results, jsonfile_prefix, metrics)
@@ -413,7 +413,8 @@ class CocoDataset(CustomDataset):
                  classwise=False,
                  proposal_nums=(100, 300, 1000),
                  iou_thrs=None,
-                 metric_items=None):
+                 metric_items=None,
+                 multitask=False):
         """Evaluation in COCO protocol.
 
         Args:
@@ -457,7 +458,7 @@ class CocoDataset(CustomDataset):
             if not isinstance(metric_items, list):
                 metric_items = [metric_items]
 
-        result_files, tmp_dir = self.format_results(results, jsonfile_prefix, metrics)
+        result_files, tmp_dir = self.format_results(results, jsonfile_prefix, metrics, multitask=multitask)
 
         eval_results = {}
         cocoGt = self.coco

@@ -137,5 +137,6 @@ lr_config = dict(
     warmup_ratio=1.0 / 5,
     step=[270, 300])
 checkpoint_config = dict(interval=10)
+evaluation = dict(interval=1, metric=['bbox', 'keypoints'], multitask=True)
 # runtime settings
 total_epochs = 320

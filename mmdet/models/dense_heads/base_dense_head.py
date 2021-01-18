@@ -58,11 +58,11 @@ class BaseDenseHead(nn.Module, metaclass=ABCMeta):
             proposal_list = self.get_bboxes(*outs, img_metas, cfg=proposal_cfg)
             return losses, proposal_list
 
-    def preprocess(self, *head_ins, return_loss=False):
-        return head_ins
+    def preprocess(self, *inputs, return_loss=False):
+        return inputs
 
-    def feat_process(self, *head_outs, return_loss=False):
-        return head_outs
+    def interprocess(self, *inputs, return_loss=False):
+        return inputs
 
-    def postprocess(self, *head_outs, return_loss=False):
-        return head_outs
+    def postprocess(self, *inputs, return_loss=False):
+        return inputs

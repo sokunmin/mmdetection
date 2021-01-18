@@ -79,7 +79,9 @@ class CenterHead(CornerHead):
         return ct_hm, ct_offset, ct_wh
 
     def get_bboxes(self,
-                   pred_ct_cls, pred_ct_offset, pred_ct_wh,
+                   pred_ct_cls,
+                   pred_ct_offset,
+                   pred_ct_wh,
                    img_metas,
                    rescale=False,
                    with_nms=True):
@@ -151,16 +153,69 @@ class CenterHead(CornerHead):
         # TOCHECK: `self._bboxes_nms` in `Cornerhead`
         return bboxes, labels
 
+    def interprocess(self, *inputs, return_loss=False):
+        if return_loss:
+            """
+            [IN] bbox_head() -> (
+                preds: 
+                    bbox=(ct_hm, ct_offset, ct_wh)
+                gts: (gt_bboxes, gt_masks, gt_keypoints, gt_labels)
+                metas: 
+                    bbox=None
+            ) -> (gt_boxes, gt_labels)
+            [OUT] -> get_targets(gt_boxes, gt_labels, ...)
+            """
+            pred_outs, gt_inputs, metas = inputs
+            gt_boxes, gt_labels = gt_inputs[0], gt_inputs[3]
+            return gt_boxes, gt_labels
+        else:
+            """
+            [IN] bbox_head() -> (
+                preds: 
+                    bbox=(ct_hm, ct_offset, ct_wh)
+                metas:
+                    bbox=(scores, feat_bboxes, ct_inds, ct_xs, ct_ys)
+            )
+            [OUT] -> get_bboxes(ct_hm, ct_offset, ct_wh, ...)
+            """
+            pred_outs = inputs[0]
+            return pred_outs['bbox']
+
     def postprocess(self, *inputs, return_loss=False):
         if return_loss:
-            pred_outs, gt_inputs, gt_metas, img_metas = inputs
-            gt_box_input, gt_box_meta = gt_inputs['bbox'], gt_metas['bbox']
-            new_inputs = pred_outs + gt_box_input + (gt_box_meta, img_metas,)
+            """
+            [IN] get_targets() -> (
+                preds: 
+                    bbox=(ct_hm, ct_offset, ct_wh)
+                targets: 
+                    bbox=(heatmap, reg_target, wh_target, ind_target, target_mask)
+                metas: 
+                    bbox=(feat_gt_centers_int, gt_radius)
+            ) -> (
+                ct_hm, ct_offset, ct_wh, 
+                hm_target, reg_target, wh_target, ct_ind_target, ct_target_mask,
+            )
+            [OUT] -> loss(
+                pred_hm, pred_reg, pred_wh, 
+                hm_target, reg_target, wh_target, ct_ind_target, ct_target_mask,
+                gt_metas=(feat_gt_centers_int, gt_radius), 
+            )
+            """
+            pred_outs, targets, metas = inputs
+            box_targets, box_meta = targets['bbox'], metas['bbox']
+            new_inputs = pred_outs + box_targets + (box_meta,)
         else:
-            head_outs, bbox_list = inputs
-            new_bbox_list, bbox_metas = bbox_list
-            head_outs['bbox'] = head_outs['bbox'] + bbox_metas
-            new_inputs = (head_outs, new_bbox_list)
+            """
+            [IN] get_bboxes() -> (
+                preds: 
+                    bbox=(ct_hm, ct_offset, ct_wh)
+                metas: 
+                    bbox=(scores, feat_bboxes, ct_inds, ct_xs, ct_ys)
+                dets: (bboxes, labels)
+            ) 
+            [OUT] (preds, dets) -> bbox2results(det_bboxes, det_labels)
+            """
+            new_inputs = inputs
         return new_inputs
 
     @force_fp32(apply_to=('pred_heatmap', 'pred_reg', 'pred_wh'))
@@ -168,11 +223,11 @@ class CenterHead(CornerHead):
              pred_hm,  # (B, #cls, H, W)
              pred_reg,  # (B, 2, H, W)
              pred_wh,  # (B, 2, H, W)
-             gt_hm,
-             gt_reg,
-             gt_wh,
-             gt_inds,
-             gt_mask,
+             hm_target,
+             reg_target,
+             wh_target,
+             ct_ind_target,
+             ct_target_mask,
              gt_metas,
              img_metas,
              gt_bboxes_ignore=None,
@@ -180,30 +235,30 @@ class CenterHead(CornerHead):
              gt_keypoints_ignore=None):
         eps = 1e-12
         pred_hm = torch.clamp(pred_hm.sigmoid_(), min=eps, max=1 - eps)
-        num_pos = gt_hm.eq(1).float().sum()
+        num_pos = hm_target.eq(1).float().sum()
         # > class loss
-        loss_cls = self.loss_heatmap(pred_hm, gt_hm, avg_factor=1 if num_pos == 0 else num_pos)
-        gt_mask = gt_mask.unsqueeze(2)
+        loss_cls = self.loss_heatmap(pred_hm, hm_target, avg_factor=1 if num_pos == 0 else num_pos)
+        ct_target_mask = ct_target_mask.unsqueeze(2)
 
         eps = 1e-4
         # > width/height loss
-        pred_wh = self._transpose_and_gather_feat(pred_wh, gt_inds)
-        wh_mask = gt_mask.expand_as(pred_wh).float()
+        pred_wh = self._transpose_and_gather_feat(pred_wh, ct_ind_target)
+        wh_mask = ct_target_mask.expand_as(pred_wh).float()
         loss_wh = self.loss_bbox(pred_wh * wh_mask,
-                                 gt_wh * wh_mask,
+                                 wh_target * wh_mask,
                                  avg_factor=wh_mask.sum() + eps)
 
         # > offset loss
-        pred_reg = self._transpose_and_gather_feat(pred_reg, gt_inds)
-        reg_mask = gt_mask.expand_as(pred_reg).float()
+        pred_reg = self._transpose_and_gather_feat(pred_reg, ct_ind_target)
+        reg_mask = ct_target_mask.expand_as(pred_reg).float()
         loss_reg = self.loss_offset(pred_reg * reg_mask,
-                                    gt_reg * reg_mask,
+                                    reg_target * reg_mask,
                                     avg_factor=reg_mask.sum() + eps)
         return {'bbox/loss_heatmap': loss_cls, 'bbox/loss_reg': loss_reg, 'bbox/loss_wh': loss_wh}
 
     def get_targets(self,
-                    gt_inputs,
-                    gt_metas,
+                    gt_boxes,
+                    gt_labels,
                     feat_shapes,
                     img_metas,
                     **kwargs):
@@ -218,14 +273,13 @@ class CenterHead(CornerHead):
             box_target: tensor, (batch, 4, h, w) or (batch, 80 * 4, h, w).
             reg_weight: tensor, same as box_target.
         """
-        gt_boxes, gt_labels = gt_inputs[0], gt_inputs[3]
         img_shape = img_metas[0]['img_shape'][:2]
         feat_shape = feat_shapes[0]
         with torch.no_grad():
             # `heatmap`: (B, #cls, H, W), `wh_target`: (B, 2, H, W), `reg_target`: (B, 2, H, W)
             heatmap, reg_target, wh_target, ind_target, target_mask, feat_gt_centers_int, gt_radius = \
                 multi_apply(
-                    self.target_single_image,
+                    self._get_targets_single,
                     gt_boxes,  # (B, #obj, 4)
                     gt_labels,  # (B, #obj)
                     img_shape=img_shape,  # (img_H, img_W)
@@ -238,7 +292,7 @@ class CenterHead(CornerHead):
             target_mask = torch.stack(target_mask, dim=0)
             return (heatmap, reg_target, wh_target, ind_target, target_mask), (feat_gt_centers_int, gt_radius)
 
-    def target_single_image(self,
+    def _get_targets_single(self,
                             gt_boxes,
                             gt_labels,
                             img_shape,
@@ -261,11 +315,11 @@ class CenterHead(CornerHead):
         height_ratio = float(feat_h / img_h)
         num_objs = gt_boxes.size(0)
         # `H/W`: 128
-        gt_heatmap = gt_boxes.new_zeros(self.num_classes, feat_h, feat_w)  # > (#cls, H, W)
-        gt_reg = gt_boxes.new_zeros(self.max_objs, 2)  # > (#max_obj, 2)
-        gt_wh = gt_boxes.new_zeros(self.max_objs, 2)  # > (#max_obj, 2)
-        gt_inds = gt_boxes.new_zeros(self.max_objs, dtype=torch.int64)  # > (#max_obj,)
-        gt_mask = gt_boxes.new_zeros(self.max_objs, dtype=torch.uint8)  # > (#max_obj,)
+        hm_target = gt_boxes.new_zeros(self.num_classes, feat_h, feat_w)  # > (#cls, H, W)
+        reg_target = gt_boxes.new_zeros(self.max_objs, 2)  # > (#max_obj, 2)
+        wh_target = gt_boxes.new_zeros(self.max_objs, 2)  # > (#max_obj, 2)
+        ct_ind_target = gt_boxes.new_zeros(self.max_objs, dtype=torch.int64)  # > (#max_obj,)
+        ct_target_mask = gt_boxes.new_zeros(self.max_objs, dtype=torch.uint8)  # > (#max_obj,)
 
         feat_gt_boxes = gt_boxes.clone()  # > (#obj, 4)
         feat_gt_boxes[:, [0, 2]] *= width_ratio
@@ -276,24 +330,24 @@ class CenterHead(CornerHead):
             feat_gt_boxes[:, [1, 3]], min=0, max=feat_h - 1)  # y_min, y_max
         feat_gt_centers = (feat_gt_boxes[:, :2] + feat_gt_boxes[:, 2:]) / 2  # > (#obj, 2)
         feat_gt_centers_int = feat_gt_centers.to(torch.int)  # > (#obj, 2)
-        gt_inds[:num_objs] = feat_gt_centers_int[..., 1] * feat_h + feat_gt_centers_int[..., 0]
-        gt_reg[:num_objs] = feat_gt_centers - feat_gt_centers_int
-        gt_mask[:num_objs] = 1
+        ct_ind_target[:num_objs] = feat_gt_centers_int[..., 1] * feat_h + feat_gt_centers_int[..., 0]
+        reg_target[:num_objs] = feat_gt_centers - feat_gt_centers_int
+        ct_target_mask[:num_objs] = 1
 
         feat_gt_wh = torch.zeros_like(feat_gt_centers)  # > (#obj, 2)
         feat_gt_wh[..., 0] = feat_gt_boxes[:, 2] - feat_gt_boxes[:, 0]
         feat_gt_wh[..., 1] = feat_gt_boxes[:, 3] - feat_gt_boxes[:, 1]
-        gt_wh[:num_objs] = feat_gt_wh
+        wh_target[:num_objs] = feat_gt_wh
         gt_radius = gt_boxes.new_zeros(num_objs, dtype=torch.int32)
         for box_id in range(num_objs):
             radius = gaussian_radius(feat_gt_wh[box_id], min_overlap=self.train_cfg.min_overlap)
             radius = max(0, int(radius))
             cls_ind = gt_labels[box_id]
             gt_radius[box_id] = radius
-            gt_heatmap[cls_ind] = gen_gaussian_target(heatmap=gt_heatmap[cls_ind],
-                                                      center=feat_gt_centers_int[box_id],
-                                                      radius=radius)
-        return gt_heatmap, gt_reg, gt_wh, gt_inds, gt_mask, feat_gt_centers_int, gt_radius
+            hm_target[cls_ind] = gen_gaussian_target(heatmap=hm_target[cls_ind],
+                                                     center=feat_gt_centers_int[box_id],
+                                                     radius=radius)
+        return hm_target, reg_target, wh_target, ct_ind_target, ct_target_mask, feat_gt_centers_int, gt_radius
 
 
 @HEADS.register_module()
@@ -301,11 +355,13 @@ class CenterPoseHead(CornerHead):
 
     def __init__(self,
                  *args,
+                 stacked_convs=1,
                  feat_channels=256,
                  max_objs=128,
                  upsample_cfg=None,
                  loss_joint=None,
                  **kwargs):
+        self.stacked_convs = stacked_convs
         self.feat_channels = feat_channels
         self.upsample_cfg = upsample_cfg
         self.max_objs = max_objs
@@ -319,22 +375,25 @@ class CenterPoseHead(CornerHead):
                       [5, 11], [6, 12], [11, 12],
                       [11, 13], [13, 15], [12, 14], [14, 16]]
 
-    def build_head(self, out_channel):
+    def build_head(self, in_channel, feat_channel, stacked_convs, out_channel):
         head_convs = [ConvModule(
-            self.in_channels, self.feat_channels, 3,
+            in_channel, feat_channel, 3,
             padding=1, bias=True, act_cfg=dict(type='ReLU', inplace=True))]
-        for i in range(1, self.num_feat_levels):
+        for i in range(1, stacked_convs):
             head_convs.append(ConvModule(
-                self.feat_channels, self.feat_channels, 3,
+                feat_channel, feat_channel, 3,
                 padding=1, bias=True, act_cfg=dict(type='ReLU', inplace=True)))
 
-        head_convs.append(nn.Conv2d(self.feat_channels, out_channel, 1))
+        head_convs.append(nn.Conv2d(feat_channel, out_channel, 1))
         return nn.Sequential(*head_convs)
 
     def _init_layers(self):
-        self.kp_hm_head = self.build_head(self.num_classes)
-        self.kp_reg_head = self.build_head(2)
-        self.ct_kp_reg_head = self.build_head(self.num_classes * 2)
+        self.kp_hm_head = self.build_head(
+            self.in_channels, self.feat_channels, self.stacked_convs, self.num_classes)
+        self.kp_reg_head = self.build_head(
+            self.in_channels, self.feat_channels, self.stacked_convs, 2)
+        self.ct_kp_reg_head = self.build_head(
+            self.in_channels, self.feat_channels, self.stacked_convs, self.num_classes * 2)
 
     def init_weights(self):
         bias_cls = bias_init_with_prob(0.1)
@@ -354,86 +413,102 @@ class CenterPoseHead(CornerHead):
         ct_kp_reg = self.ct_kp_reg_head(x)
         return kp_hm, kp_reg, ct_kp_reg
 
+    def _assign_keypoints_to_instance(self,
+                                      ct_det_kps,
+                                      kp_det_kps,
+                                      det_bboxes,
+                                      kp_scores,
+                                      score_thr,
+                                      delta_weight=0.3):
+        assert kp_det_kps.size() == ct_det_kps.size()
+        batch, num_joints, num_topk, dim = kp_det_kps.size()
+        # > (B, #kps, K, K, 2)
+        ct_det_kps = ct_det_kps.unsqueeze(3).expand(batch, num_joints, num_topk, num_topk, 2)
+        kp_det_kps = kp_det_kps.unsqueeze(2).expand(batch, num_joints, num_topk, num_topk, 2)
+
+        # NOTE: `argmin(ct_kps_loc - kp_kps_loc)^2`
+        #  assign each regressed location to its closest detection keypoint
+        min_dist, min_dist_ind = (ct_det_kps - kp_det_kps).pow(2).sum(dim=-1).pow(0.5).min(dim=-1)  # > (B, #kps, K)
+        min_dist = min_dist.unsqueeze(-1)  # (B, #kps, K, 1)
+        # (B, #kps, K) ∩ (B, #kps, K) -> (B, #kps, K) -> (B, 17, K, 1)
+        kp_scores = kp_scores.gather(2, min_dist_ind).unsqueeze(-1)
+        # `min_ind`: (B, #kps, K, 1) -> (B, #kps, K, 1, 1) -> (B, #kps, K, 1, 2)
+        min_dist_ind = min_dist_ind[..., None, None].expand(batch, num_joints, num_topk, 1, 2)
+        # (B, #kps, K, K, 2) -> (B, #kps, K, 1, 2) -> (B, #kps, K, 2)
+        ct_det_kps = ct_det_kps.gather(3, min_dist_ind).view(batch, num_joints, num_topk, 2)
+        kp_det_kps = kp_det_kps.gather(3, min_dist_ind).view(batch, num_joints, num_topk, 2)
+
+        # NOTE: considering only joint detections within the bbox of detected object.
+        l = det_bboxes[..., 0].view(batch, 1, num_topk, 1).expand(batch, num_joints, num_topk, 1)
+        t = det_bboxes[..., 1].view(batch, 1, num_topk, 1).expand(batch, num_joints, num_topk, 1)
+        r = det_bboxes[..., 2].view(batch, 1, num_topk, 1).expand(batch, num_joints, num_topk, 1)
+        b = det_bboxes[..., 3].view(batch, 1, num_topk, 1).expand(batch, num_joints, num_topk, 1)
+        mask = (kp_det_kps[..., 0:1] < l) + (kp_det_kps[..., 0:1] > r) + \
+               (kp_det_kps[..., 1:2] < t) + (kp_det_kps[..., 1:2] > b) + \
+               (kp_scores < score_thr) + (min_dist > (torch.max(b - t, r - l) * delta_weight))
+        mask = (mask > 0).float().expand(batch, num_joints, num_topk, 2)
+
+        kps = (1 - mask) * kp_det_kps + mask * ct_det_kps
+        kps = kps.permute(0, 2, 1, 3).contiguous()  # (B, #kps, K, 2) -> (B, K, #kps, 2)
+        kp_scores = kp_scores.permute(0, 2, 1, 3).int()  # (B, K, #kps, 1)
+        return kps, kp_scores
+
     def get_keypoints(self,
-                      bbox_outs,
                       keypoint_outs,
+                      bbox_metas,
                       img_metas,
                       rescale=False,
                       with_nms=True):
-        bbox_scores, feat_bboxes, ct_inds, ct_xs, ct_ys = bbox_outs
-        pred_kp_hm, pred_kp_reg, pred_ct_kp_reg = keypoint_outs
+        pred_kp_hm, pred_kp_reg, pred_ct_kps = keypoint_outs
+        bbox_scores, feat_bboxes, ct_inds, ct_xs, ct_ys = bbox_metas
         batch, _, feat_h, feat_w = pred_kp_hm.size()
         num_topk = self.test_cfg.max_per_img
         num_joints = self.num_classes
-        kp_hm = pred_kp_hm.detach().sigmoid_()  # > (B, #kp, H, W)
+        kp_hm = pred_kp_hm.detach().sigmoid_()  # > (B, #kps, H, W)
         kp_offset = pred_kp_reg.detach()  # > (B, 2, H, W)
-        ct_kp_loc = pred_ct_kp_reg.detach()  # > (B, #kp x 2, H, W)
-
-        # > offsets of center to keypoints
-        ct_kp_loc = self._transpose_and_gather_feat(ct_kp_loc, ct_inds)
-        ct_kp_loc = ct_kp_loc.view(batch, num_topk, num_joints * 2)
-        ct_kp_loc[..., 0::2] += ct_xs.view(batch, num_topk, 1).expand(batch, num_topk, num_joints)
-        ct_kp_loc[..., 1::2] += ct_ys.view(batch, num_topk, 1).expand(batch, num_topk, num_joints)
-        ct_kp_loc = ct_kp_loc.view(batch, num_topk, num_joints, 2).permute(0, 2, 1, 3).contiguous()
-        ct_det_kps = ct_kp_loc.unsqueeze(3).expand(batch, num_joints, num_topk, num_topk, 2)
+        ct_kps = pred_ct_kps.detach()  # > (B, #kps x 2, H, W)
 
         # > keypoint heatmaps
         kp_hm = self._local_maximum(kp_hm, kernel=3)
         kp_scores, kp_inds, kp_ys, kp_xs = self._kepoint_topk(kp_hm, k=num_topk)
 
+        # > offsets of center to keypoints
+        ct_kps = self._transpose_and_gather_feat(ct_kps, ct_inds)  # (B, K, 34)
+        ct_kps = ct_kps.view(batch, num_topk, num_joints * 2)
+        ct_kps[..., 0::2] += ct_xs.view(batch, num_topk, 1).expand(batch, num_topk, num_joints)
+        ct_kps[..., 1::2] += ct_ys.view(batch, num_topk, 1).expand(batch, num_topk, num_joints)
+        # > (B, K, #kps, 2) -> (B, #kps, K, 2)
+        ct_kps = ct_kps.view(batch, num_topk, num_joints, 2).permute(0, 2, 1, 3).contiguous()
+
         # > keypoint regressed locations
         kp_offset = self._transpose_and_gather_feat(kp_offset, kp_inds.view(batch, -1))
-        kp_offset = kp_offset.view(batch, num_joints, num_topk, 2)
+        kp_offset = kp_offset.view(batch, num_joints, num_topk, 2)  # (B, #kps, K, 2)
         kp_xs += kp_offset[..., 0]
         kp_ys += kp_offset[..., 1]
 
         # > keep positives
-        mask = (kp_scores > self.test_cfg.kp_score_thr).float()
+        mask = (kp_scores > self.test_cfg.kp_score_thr).float()  # (B, #kps, K)
         kp_scores = (1 - mask) * -1 + mask * kp_scores
         kp_xs = (1 - mask) * (-10000) + mask * kp_xs
         kp_ys = (1 - mask) * (-10000) + mask * kp_ys
 
-        kp_det_kps = torch.stack([kp_xs, kp_ys], dim=-1).unsqueeze(2)
-        kp_det_kps = kp_det_kps.expand(batch, num_joints, num_topk, num_topk, 2)
+        kp_det_kps = torch.stack([kp_xs, kp_ys], dim=-1)
 
-        # NOTE: assign each regressed location to its closest detectio keypoint `argmin(ct_kps_loc - kp_kps_loc)^2`
-        dist = (((ct_det_kps - kp_det_kps) ** 2).sum(dim=4) ** 0.5)
-        min_dist, min_dist_ind = dist.min(dim=3)
-        min_dist = min_dist.unsqueeze(-1)  # (B, #kp, K, 1)
-
-        kp_scores = kp_scores.gather(2, min_dist_ind).unsqueeze(-1)
-        # `min_ind`: (B, #kp, K, 1) -> (B, #kp, K, 1, 1) -> (B, #kp, K, 1, 2)
-        min_dist_ind = min_dist_ind.view(batch, num_joints, num_topk, 1, 1)
-        min_dist_ind = min_dist_ind.expand(batch, num_joints, num_topk, 1, 2)
-
-        kp_det_kps = kp_det_kps.gather(3, min_dist_ind)  # (B, #kp, K, K, 2)
-        kp_det_kps = kp_det_kps.view(batch, num_joints, num_topk, 2)  # (B, #kp, K, 2)
-
-        l = feat_bboxes[..., 0].view(batch, 1, num_topk, 1).expand(batch, num_joints, num_topk, 1)
-        t = feat_bboxes[..., 1].view(batch, 1, num_topk, 1).expand(batch, num_joints, num_topk, 1)
-        r = feat_bboxes[..., 2].view(batch, 1, num_topk, 1).expand(batch, num_joints, num_topk, 1)
-        b = feat_bboxes[..., 3].view(batch, 1, num_topk, 1).expand(batch, num_joints, num_topk, 1)
-        mask = (kp_det_kps[..., 0:1] < l) + (kp_det_kps[..., 0:1] > r) + \
-               (kp_det_kps[..., 1:2] < t) + (kp_det_kps[..., 1:2] > b) + \
-               (kp_scores < self.test_cfg.kp_score_thr) + (min_dist > (torch.max(b - t, r - l) * 0.3))
-        mask = (mask > 0).float().expand(batch, num_joints, num_topk, 2)
-
-        kps = (1 - mask) * kp_det_kps + mask * ct_kp_loc
-        kps = kps.permute(0, 2, 1, 3).contiguous().view(batch, num_topk, num_joints * 2)
-        kp_scores = torch.transpose(kp_scores.squeeze(dim=3), 1, 2)  # (B, K, #kp)
+        det_kps, det_scores = self._assign_keypoints_to_instance(
+            ct_kps, kp_det_kps, feat_bboxes, kp_scores, self.test_cfg.kp_score_thr)
 
         result_list = []
         for img_id in range(len(img_metas)):
             result_list.append(self.get_keypoints_single(
-                kps[img_id],
-                kp_scores[img_id],
+                det_kps[img_id],
+                det_scores[img_id],
                 bbox_scores[img_id],
                 img_metas[img_id],
                 (feat_h, feat_w),
                 rescale=rescale,
-                with_nms=True
+                with_nms=with_nms
             ))
-        return result_list
+        return result_list, None
 
     def get_keypoints_single(self,
                              keypoints,
@@ -447,13 +522,11 @@ class CenterPoseHead(CornerHead):
         num_topk = self.test_cfg.max_per_img
         width_ratio = float(feat_size[1] / pad_w)
         height_ratio = float(feat_size[0] / pad_h)
-        keypoints = keypoints.view(keypoints.size(0), self.num_classes, 2)
         keypoints[..., 0] /= width_ratio
         keypoints[..., 1] /= height_ratio
         if rescale:
             scale_factor = img_meta['scale_factor'][:2]
             keypoints /= keypoints.new_tensor(scale_factor)
-        scores = (scores > self.test_cfg.kp_score_thr).int().unsqueeze(-1)
 
         keypoints = torch.cat([keypoints, scores], dim=2).view(num_topk, -1)  # (K, #kp x 3)
         keypoints = torch.cat([keypoints, bbox_scores], dim=1)  # (K, #kp x 3 + 1)
@@ -461,7 +534,6 @@ class CenterPoseHead(CornerHead):
         return keypoints
 
     def _kepoint_topk(self, scores, k=20):
-        # TOCHECK: use `CornerHead._topk()`
         batch, cls, height, width = scores.size()
         # `scores`: (B, #cls, H, W) -> (B, #cls, HxW) -> (B, #cls, K)
         topk_scores, topk_inds = torch.topk(scores.view(batch, cls, -1), k)
@@ -472,18 +544,96 @@ class CenterPoseHead(CornerHead):
 
         return topk_scores, topk_inds, topk_ys, topk_xs
 
-    def feat_process(self, bbox_outs, keypoint_outs, return_loss=False):
-        new_bbox_outs = bbox_outs[3:]
-        return new_bbox_outs, keypoint_outs
+    def interprocess(self, *inputs, return_loss=False):
+        if return_loss:
+            # `TRAIN`
+            """
+            [IN] keypoint_head() -> (
+                preds:
+                    bbox=(ct_hm, ct_offset, ct_wh)
+                    keypoint=(kp_hm, kp_reg, ct_kp_reg)
+                gts: (gt_bboxes, gt_masks, gt_keypoints, gt_labels)
+                metas: 
+                    bbox=(feat_gt_centers_int, gt_radius)
+            ) -> (
+                (gt_keypoints, gt_labels),
+                (feat_gt_centers_int, gt_radius)
+            )
+            [OUT] -> get_targets(
+                gt_inputs: (gt_keypoints, gt_labels)
+                boxes_meta: (feat_gt_centers_int, gt_radius)
+            )
+            """
+            pred_outs, gt_inputs, metas = inputs
+            gt_keypoints, gt_labels = gt_inputs[2], gt_inputs[3]
+            boxes_meta = metas['bbox']
+            return (gt_keypoints, gt_labels), boxes_meta
+        else:
+            # `TEST`
+            """
+            [IN] keypoint_head() -> (
+                preds:
+                    bbox=(ct_hm, ct_offset, ct_wh)
+                    keypoint=(kp_hm, kp_reg, ct_kp_reg)
+                metas:
+                    bbox=(scores, feat_bboxes, ct_inds, ct_xs, ct_ys)
+                    keypoint=None
+            ) -> (
+                (kp_hm, kp_reg, ct_kp_reg)
+                (scores, feat_bboxes, ct_inds, ct_xs, ct_ys),
+            )
+            [OUT] -> get_keypoints(
+                keypoint_outs: (pred_kp_hm, pred_kp_reg, pred_ct_kp_reg)
+                bbox_metas: (bbox_scores, feat_bboxes, ct_inds, ct_xs, ct_ys)
+            )
+            """
+            pred_outs, metas = inputs
+            keypoint_outs = pred_outs['keypoint']
+            bbox_metas = metas['bbox']
+            return keypoint_outs, bbox_metas
 
     def postprocess(self, *inputs, return_loss=False):
         if return_loss:
-            pred_outs, gt_inputs, gt_metas, img_metas = inputs
-            # > heatmap, reg_target, ct2kps_target, reg_ind_target, target_reg_mask, target_ck2kps_mask
-            gt_keypoint_input = gt_inputs['keypoint']
-            bbox_ind_target = gt_inputs['bbox'][3]
-            new_inputs = pred_outs + gt_keypoint_input + (bbox_ind_target, img_metas,)
+            # `TRAIN`
+            """
+            [IN] get_targets() -> (
+                preds:
+                    bbox=(ct_hm, ct_offset, ct_wh)
+                    keypoint=(kp_hm, kp_reg, ct_kp_reg)
+                targets:
+                    bbox=(hm_target, reg_target, wh_target, ind_target, target_mask)
+                    keypoint=(hm_target, reg_target, ct2kps_target, reg_ind_target, target_reg_mask, target_ck2kps_mask)
+                metas:
+                    bbox=(feat_gt_centers_int, gt_radius)
+                    keypoint=None
+            ) -> (
+                kp_hm, kp_reg, ct_kp_reg,
+                hm_target, reg_target, ct2kps_target, reg_ind_target, reg_target_mask, ck2kps_target_mask,
+                ct_ind_target
+            )
+            [OUT] -> loss(
+                pred_hm, pred_reg, pred_ct2kps,
+                hm_target, reg_target, ct2kps_target, reg_ind_target, reg_target_mask, ck2kps_target_mask,
+                ct_ind_target
+            ) 
+            """
+            pred_outs, targets, metas = inputs
+            keypoint_targets = targets['keypoint']
+            bbox_ind_target = targets['bbox'][3]
+            new_inputs = pred_outs + keypoint_targets + (bbox_ind_target,)
         else:
+            # `TEST`
+            """
+            [IN] get_keypoints() -> (
+                preds:
+                    bbox=(ct_hm, ct_offset, ct_wh)
+                    keypoint=(kp_hm, kp_reg, ct_kp_reg)
+                metas: 
+                    bbox=(scores, feat_bboxes, ct_inds, ct_xs, ct_ys)
+                dets: (keypoints,)         
+            )
+            [OUT] (preds, dets) -> keypoint2result(keypoints)
+            """
             new_inputs = inputs
         return new_inputs
 
@@ -492,50 +642,50 @@ class CenterPoseHead(CornerHead):
              pred_hm,  # (B, #joints, H, W)
              pred_reg,  # (B, 2, H, W)
              pred_ct2kps,  # (B, #joints x 2, H, W)
-             gt_hm,
-             gt_reg,
-             gt_ct2kps,
-             gt_reg_inds,
-             gt_reg_mask,
-             gt_ct2kps_mask,
-             gt_ct_inds,
+             hm_target,
+             reg_target,
+             ct2kps_target,
+             reg_ind_target,
+             reg_target_mask,
+             ck2kps_target_mask,
+             ct_ind_target,
              img_metas,
              gt_bboxes_ignore=None,
              gt_masks_ignore=None,
              gt_keypoints_ignore=None):
         eps = 1e-12
         pred_hm = torch.clamp(pred_hm.sigmoid_(), min=eps, max=1 - eps)
-        num_pos = gt_hm.eq(1).float().sum()
+        num_pos = hm_target.eq(1).float().sum()
         # > keypoint heatmap loss
-        loss_hm = self.loss_heatmap(pred_hm, gt_hm, avg_factor=1 if num_pos == 0 else num_pos)
+        loss_hm = self.loss_heatmap(pred_hm, hm_target, avg_factor=1 if num_pos == 0 else num_pos)
 
         eps = 1e-4
         # > center2keypoint loss
-        pred_ct2kps = self._transpose_and_gather_feat(pred_ct2kps, gt_ct_inds)
-        ct2kps_mask = gt_ct2kps_mask.float()
+        pred_ct2kps = self._transpose_and_gather_feat(pred_ct2kps, ct_ind_target)
+        ct2kps_mask = ck2kps_target_mask.float()
         loss_joint = self.loss_joint(pred_ct2kps * ct2kps_mask,
-                                     gt_ct2kps * ct2kps_mask,
+                                     ct2kps_target * ct2kps_mask,
                                      avg_factor=ct2kps_mask.sum() + eps)
 
         # > offset loss
-        pred_reg = self._transpose_and_gather_feat(pred_reg, gt_reg_inds)   # TOCHECK: index out of bounds
-        reg_mask = gt_reg_mask.unsqueeze(2).expand_as(pred_reg).float()
+        pred_reg = self._transpose_and_gather_feat(pred_reg, reg_ind_target)
+        reg_mask = reg_target_mask.unsqueeze(2).expand_as(pred_reg).float()
         loss_reg = self.loss_offset(pred_reg * reg_mask,
-                                    gt_reg * reg_mask,
+                                    reg_target * reg_mask,
                                     avg_factor=reg_mask.sum() + eps)
         return {'keypoint/loss_heatmap': loss_hm, 'keypoint/loss_reg': loss_reg, 'keypoint/loss_joint': loss_joint}
 
     def get_targets(self,
                     gt_inputs,
-                    gt_metas,
+                    box_metas,
                     feat_shapes,
                     img_metas,
                     **kwargs):
         """
         Args:
-            gt_boxes: list(tensor). tensor <=> image, (gt_num, 4).
-            gt_keypoints: list(tensor). tensor <=> image, (gt_num, 3).
-            gt_labels: list(tensor). tensor <=> image, (gt_num,).
+            gt_inputs: (gt_keypoints, gt_labels).
+            box_metas: (feat_gt_centers_int, gt_radius)
+            feat_shapes: tuple
             img_metas: list(dict).
 
         Returns:
@@ -543,14 +693,13 @@ class CenterPoseHead(CornerHead):
             box_target: tensor, (batch, 4, h, w) or (batch, 80 * 4, h, w).
             reg_weight: tensor, same as box_target.
         """
-        gt_keypoints, gt_labels = gt_inputs[2], gt_inputs[3]
-        gt_boxes_meta = gt_metas['bbox']
+        gt_keypoints, gt_labels = gt_inputs
+        feat_gt_centers_int, gt_radius = box_metas
         img_shape = img_metas[0]['img_shape'][:2]
         feat_shape = feat_shapes[0]  # > (#level, 2)
-        feat_gt_centers_int, gt_radius = gt_boxes_meta
         with torch.no_grad():
-            heatmap, reg_target, ct2kps_target, reg_ind_target, target_reg_mask, target_ck2kps_mask = multi_apply(
-                self.target_single_image,
+            heatmap, reg_target, ct2kps_target, reg_ind_target, reg_target_mask, ck2kps_target_mask = multi_apply(
+                self._get_targets_single,
                 gt_keypoints,
                 gt_radius,  # (B, #obj, 4)
                 feat_gt_centers_int,
@@ -561,16 +710,17 @@ class CenterPoseHead(CornerHead):
             reg_target = torch.stack(reg_target, dim=0)
             ct2kps_target = torch.stack(ct2kps_target, dim=0)
             reg_ind_target = torch.stack(reg_ind_target, dim=0).to(torch.long)
-            target_reg_mask = torch.stack(target_reg_mask, dim=0)
-            target_ck2kps_mask = torch.stack(target_ck2kps_mask, dim=0)
-            return (heatmap, reg_target, ct2kps_target, reg_ind_target, target_reg_mask, target_ck2kps_mask), None
+            reg_target_mask = torch.stack(reg_target_mask, dim=0)
+            ck2kps_target_mask = torch.stack(ck2kps_target_mask, dim=0)
+            return (heatmap, reg_target, ct2kps_target, reg_ind_target, reg_target_mask, ck2kps_target_mask), None
 
-    def target_single_image(self,
+    def _get_targets_single(self,
                             gt_keypoints,
                             gt_radius,
                             feat_gt_centers_int,
                             img_shape,
-                            feat_shape):
+                            feat_shape,
+                            **kwargs):
         """
 
         Args:
@@ -591,19 +741,19 @@ class CenterPoseHead(CornerHead):
         num_objs = gt_keypoints.size(0)
         num_joints = self.num_classes
         # `H/W`: 128
-        gt_heatmap = gt_keypoints.new_zeros(num_joints, feat_h, feat_w)  # > (#joint, H, W)
-        gt_reg = gt_keypoints.new_zeros(self.max_objs * num_joints, 2)  # > (#max_obj x #joint, 2)
-        gt_ct2kps = gt_keypoints.new_zeros(self.max_objs, num_joints * 2)  # > (#max_obj, #joint x 2)
-        gt_reg_inds = gt_keypoints.new_zeros(self.max_objs * num_joints, dtype=torch.int64)  # > (#max_obj x #joint,)
-        gt_reg_mask = gt_keypoints.new_zeros(self.max_objs * num_joints, dtype=torch.int64)  # > (#max_obj,)
-        gt_ct2kps_mask = gt_keypoints.new_zeros(self.max_objs, num_joints * 2, dtype=torch.uint8)  # > (#max_obj,)
+        hm_target = gt_keypoints.new_zeros(num_joints, feat_h, feat_w)  # > (#joint, H, W)
+        reg_target = gt_keypoints.new_zeros(self.max_objs * num_joints, 2)  # > (#max_obj x #joint, 2)
+        ct2kps_target = gt_keypoints.new_zeros(self.max_objs, num_joints * 2)  # > (#max_obj, #joint x 2)
+        reg_ind_target = gt_keypoints.new_zeros(self.max_objs * num_joints, dtype=torch.int64)  # > (#max_obj x #joint,)
+        reg_target_mask = gt_keypoints.new_zeros(self.max_objs * num_joints, dtype=torch.int64)  # > (#max_obj,)
+        ct2kps_target_mask = gt_keypoints.new_zeros(self.max_objs, num_joints * 2, dtype=torch.uint8)  # > (#max_obj,)
 
-        feat_gt_keypints = gt_keypoints.clone()  # > (#obj, #joints(x,y,v))
-        feat_gt_keypints[..., 0] *= width_ratio
-        feat_gt_keypints[..., 1] *= height_ratio
+        feat_gt_keypoints = gt_keypoints.clone()  # > (#obj, #joints(x,y,v))
+        feat_gt_keypoints[..., 0] *= width_ratio
+        feat_gt_keypoints[..., 1] *= height_ratio
 
         for obj_id in range(num_objs):
-            feat_obj_keypoints = feat_gt_keypints[obj_id]
+            feat_obj_keypoints = feat_gt_keypoints[obj_id]
             radius = gt_radius[obj_id]
             for joint_id in range(num_joints):
                 if feat_obj_keypoints[joint_id, 2] > 0:
@@ -612,12 +762,12 @@ class CenterPoseHead(CornerHead):
                     if 0 <= joint_xy[0] < feat_w and 0 <= joint_xy[1] < feat_h:
                         start_ind, end_ind = joint_id * 2, joint_id * 2 + 2
                         obj_joint_ind = obj_id * num_joints + joint_id
-                        gt_reg[obj_joint_ind] = joint_xy - joint_xy_int
-                        gt_reg_inds[obj_joint_ind] = joint_xy_int[1] * feat_h + joint_xy_int[0]
-                        gt_reg_mask[obj_joint_ind] = 1
-                        gt_ct2kps[obj_id, start_ind:end_ind] = joint_xy - feat_gt_centers_int[obj_id]
-                        gt_ct2kps_mask[obj_id, start_ind:end_ind] = 1
-                        gt_heatmap[joint_id] = gen_gaussian_target(heatmap=gt_heatmap[joint_id],
+                        reg_target[obj_joint_ind] = joint_xy - joint_xy_int
+                        reg_ind_target[obj_joint_ind] = joint_xy_int[1] * feat_h + joint_xy_int[0]
+                        reg_target_mask[obj_joint_ind] = 1
+                        ct2kps_target[obj_id, start_ind:end_ind] = joint_xy - feat_gt_centers_int[obj_id]
+                        ct2kps_target_mask[obj_id, start_ind:end_ind] = 1
+                        hm_target[joint_id] = gen_gaussian_target(heatmap=hm_target[joint_id],
                                                                    center=joint_xy_int,
                                                                    radius=int(radius))
-        return gt_heatmap, gt_reg, gt_ct2kps, gt_reg_inds, gt_reg_mask, gt_ct2kps_mask
+        return hm_target, reg_target, ct2kps_target, reg_ind_target, reg_target_mask, ct2kps_target_mask
