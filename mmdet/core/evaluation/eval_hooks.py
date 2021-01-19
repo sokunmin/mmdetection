@@ -38,6 +38,7 @@ class EvalHook(Hook):
         self.interval = interval
         self.start = start
         self.eval_kwargs = eval_kwargs
+        self.multitask = eval_kwargs.get('multitask', False)
         self.initial_epoch_flag = True
 
     def before_train_epoch(self, runner):
@@ -71,7 +72,7 @@ class EvalHook(Hook):
         if not self.evaluation_flag(runner):
             return
         from mmdet.apis import single_gpu_test
-        results = single_gpu_test(runner.model, self.dataloader, show=False)
+        results = single_gpu_test(runner.model, self.dataloader, show=False, multitask=self.multitask)
         self.evaluate(runner, results)
 
     def evaluate(self, runner, results):
@@ -126,7 +127,8 @@ class DistEvalHook(EvalHook):
             runner.model,
             self.dataloader,
             tmpdir=tmpdir,
-            gpu_collect=self.gpu_collect)
+            gpu_collect=self.gpu_collect,
+            multitask=self.multitask)
         if runner.rank == 0:
             print('\n')
             self.evaluate(runner, results)

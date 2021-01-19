@@ -12,9 +12,9 @@ IFS="|"
 ARG_COUNT=6
 CONFIGS=(
 # mode: ([train, traineval], test)
-# > "mode  | config_dir  | config_py   | resume_ckpt  | eval_metrics | test_ckpt | deterministic"
+# > "mode  | config_dir  | config_py                 | resume_ckpt  | eval_metrics    | test_ckpt | deterministic"
 # e.g.
-    "train | centernet     | centernet_r18_3x_pose.py          |                | bbox, keypoint | --deterministic |"
+    "train | centernet   | centernet_r18_3x_pose.py  |              | bbox, keypoints | --deterministic |"
 )
 TRAIN_GPUS=2
 TEST_GPUS=1

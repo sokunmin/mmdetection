@@ -470,7 +470,7 @@ class CenterPoseHead(CornerHead):
 
         # > keypoint heatmaps
         kp_hm = self._local_maximum(kp_hm, kernel=3)
-        kp_scores, kp_inds, kp_ys, kp_xs = self._kepoint_topk(kp_hm, k=num_topk)
+        kp_scores, kp_inds, kp_ys, kp_xs = self._keypoint_topk(kp_hm, k=num_topk)
 
         # > offsets of center to keypoints
         ct_kps = self._transpose_and_gather_feat(ct_kps, ct_inds)  # (B, K, 34)
@@ -491,11 +491,10 @@ class CenterPoseHead(CornerHead):
         kp_scores = (1 - mask) * -1 + mask * kp_scores
         kp_xs = (1 - mask) * (-10000) + mask * kp_xs
         kp_ys = (1 - mask) * (-10000) + mask * kp_ys
-
-        kp_det_kps = torch.stack([kp_xs, kp_ys], dim=-1)
+        kp_kps = torch.stack([kp_xs, kp_ys], dim=-1)
 
         det_kps, det_scores = self._assign_keypoints_to_instance(
-            ct_kps, kp_det_kps, feat_bboxes, kp_scores, self.test_cfg.kp_score_thr)
+            ct_kps, kp_kps, feat_bboxes, kp_scores, self.test_cfg.kp_score_thr)
 
         result_list = []
         for img_id in range(len(img_metas)):
@@ -533,7 +532,7 @@ class CenterPoseHead(CornerHead):
         # TOCHECK: add concat() to (K, 56) for softnms39().
         return keypoints
 
-    def _kepoint_topk(self, scores, k=20):
+    def _keypoint_topk(self, scores, k=20):
         batch, cls, height, width = scores.size()
         # `scores`: (B, #cls, H, W) -> (B, #cls, HxW) -> (B, #cls, K)
         topk_scores, topk_inds = torch.topk(scores.view(batch, cls, -1), k)

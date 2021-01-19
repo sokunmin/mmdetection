@@ -450,7 +450,9 @@ class TTFPoseHead(CenterPoseHead):
 
     def forward(self, x):
         kp_hm = self.kp_hm_head(x)
-        ct_kps = F.relu(self.ct_kps_head(x)) * self.offset_base
+        ct_kps = self.ct_kps_head(x)
+        if self.with_base_loc:
+            ct_kps = F.relu(ct_kps) * self.offset_base
         return kp_hm, ct_kps
 
     def get_keypoints(self,
@@ -473,8 +475,8 @@ class TTFPoseHead(CenterPoseHead):
         # > perform nms & topk over center points
         kp_hm = self._local_maximum(kp_hm, kernel=3)  # used maxpool to filter the max score
         kp_scores, kp_inds, kp_ys, kp_xs = self._keypoint_topk(kp_hm, k=num_topk)
-        kp_xs = kp_xs.view(batch, num_topk, 1) / width_ratio
-        kp_ys = kp_ys.view(batch, num_topk, 1) / height_ratio
+        kp_xs /= width_ratio
+        kp_ys /= height_ratio
 
         # NOTE: centers(ct_xs, ct_ys) already mapped back to original image size,
         # > (B, #kps, H, W) -> (B, H, W, #kps) -> (B, K, #kps)
@@ -488,10 +490,10 @@ class TTFPoseHead(CenterPoseHead):
         kp_scores = (1 - scores_mask) * -1 + scores_mask * kp_scores
         kp_xs = (1 - scores_mask) * (-10000) + scores_mask * kp_xs
         kp_ys = (1 - scores_mask) * (-10000) + scores_mask * kp_ys
-        kp_det_kps = torch.stack([kp_xs, kp_ys], dim=-1)
+        kp_kps = torch.stack([kp_xs, kp_ys], dim=-1)
 
         det_kps, det_scores = self._assign_keypoints_to_instance(
-            ct_kps, kp_det_kps, bboxes, kp_scores, self.test_cfg.kp_score_thr)
+            ct_kps, kp_kps, bboxes, kp_scores, self.test_cfg.kp_score_thr)
 
         result_list = []
         for img_id in range(len(img_metas)):
@@ -634,8 +636,8 @@ class TTFPoseHead(CenterPoseHead):
         return points
 
     def loss(self,
-             kp_hm,
-             ct_kps,
+             pred_kp_hm,
+             pred_ct_kps,
              hm_target,
              ct_kps_target,
              ct_ind_target,
@@ -645,25 +647,24 @@ class TTFPoseHead(CenterPoseHead):
              **kwargs):
         eps = 1e-4
         img_h, img_w = img_metas[0]['pad_shape'][:2]
-        num_joints, feat_h, feat_w = kp_hm.shape[1:]
+        num_joints, feat_h, feat_w = pred_kp_hm.shape[1:]
         width_ratio = float(img_w / feat_w)  # > 4
         height_ratio = float(img_h / feat_h)
-        kp_hm = torch.clamp(kp_hm.sigmoid_(), min=eps, max=1 - eps)
+        pred_kp_hm = torch.clamp(pred_kp_hm.sigmoid_(), min=eps, max=1 - eps)
         num_pos = hm_target.eq(1).float().sum()
-        hm_loss = self.loss_heatmap(kp_hm, hm_target, avg_factor=1 if num_pos == 0 else num_pos)
+        hm_loss = self.loss_heatmap(pred_kp_hm, hm_target, avg_factor=1 if num_pos == 0 else num_pos)
 
-        mask = reg_weight.view(-1, feat_h, feat_w)
-
-        if self.base_loc is None or \
-                feat_h != self.base_loc.shape[1] or \
-                feat_w != self.base_loc.shape[2]:
-            self.base_loc = self.get_points((feat_h, feat_w),
-                                            (height_ratio, width_ratio),
-                                            dtype=torch.float32,
-                                            device=hm_target.device)
-        pred_ct_kps = torch.cat((self.base_loc[0] + ct_kps[:, 0::2],
-                                 self.base_loc[1] + ct_kps[:, 1::2]), dim=1)
         if self.with_base_loc:
+            if self.base_loc is None or \
+                    feat_h != self.base_loc.shape[1] or \
+                    feat_w != self.base_loc.shape[2]:
+                self.base_loc = self.get_points((feat_h, feat_w),
+                                                (height_ratio, width_ratio),
+                                                dtype=torch.float32,
+                                                device=hm_target.device)
+            pred_ct_kps = torch.cat((self.base_loc[0] + pred_ct_kps[:, 0::2],
+                                     self.base_loc[1] + pred_ct_kps[:, 1::2]), dim=1)
+            mask = reg_weight.view(-1, feat_h, feat_w)
             pred_ct_kps = pred_ct_kps.permute(0, 2, 3, 1)
             ct_kps_target = ct_kps_target.permute(0, 2, 3, 1)
             keep = mask > 0  # (B, H, W)
@@ -673,7 +674,7 @@ class TTFPoseHead(CenterPoseHead):
             reg_loss = self.loss_joint(pred_ct_kps, ct_kps_target, mask, avg_factor=mask.sum() + eps)
         else:
             ct_target_mask = ct_target_mask.float()
-            pred_ct_kps = self._transpose_and_gather_feat(pred_ct_kps, ct_ind_target)   # TOCHECK: index out of bounds
+            pred_ct_kps = self._transpose_and_gather_feat(pred_ct_kps, ct_ind_target)
             reg_loss = self.loss_joint(pred_ct_kps * ct_target_mask,
                                        ct_kps_target * ct_target_mask,
                                        avg_factor=ct_target_mask.sum() + eps)
@@ -702,8 +703,8 @@ class TTFPoseHead(CenterPoseHead):
             )
             hm_target = torch.stack(hm_target, dim=0).detach()
             ct_kps_target = torch.stack(ct_kps_target, dim=0).detach()
-            ct_ind_target = torch.stack(ct_ind_target, dim=0).to(torch.long)
-            ct_target_mask = torch.stack(ct_target_mask, dim=0)
+            ct_ind_target = torch.stack(ct_ind_target, dim=0).to(torch.long).detach()
+            ct_target_mask = torch.stack(ct_target_mask, dim=0).detach()
             reg_weight = torch.stack(reg_weight, dim=0).detach()
             return (hm_target, ct_kps_target, ct_ind_target, ct_target_mask, reg_weight), None
 
@@ -726,7 +727,7 @@ class TTFPoseHead(CenterPoseHead):
 
         gt_heatmap = gt_keypoints.new_zeros(num_joints, feat_h, feat_w)  # > (#joint, H, W)
         fake_heatmap = gt_keypoints.new_zeros((feat_h, feat_w))  # > (H, W)
-        reg_weight = gt_keypoints.new_zeros((1, feat_h, feat_w))  # > (#joint, H, W)
+        reg_weight = gt_keypoints.new_zeros((34, feat_h, feat_w))  # > (#joint, H, W)
         if self.with_base_loc:
             ct_kps_target = gt_keypoints.new_zeros((num_joints * 2, feat_h, feat_w)) * -1  # (#joint x 2, H, W)
         else:
@@ -771,11 +772,11 @@ class TTFPoseHead(CenterPoseHead):
                                 gt_keypoints[obj_id, joint_id, :2][:, None]
                         else:
                             # TOCHECK: centernet's way [1]
-                            # ct_kps_target[joint_id:joint_id+2, kp_target_inds] = \
-                            #     (gt_keypoints[obj_id, joint_id, :2] - gt_centers[obj_id]).unsqueeze(-1)
-                            # TOCHECK: centernet's way [2]
                             ct_kps_target[obj_id, start_ind:end_ind] = \
-                                gt_keypoints[obj_id, joint_id, :2] - feat_gt_centers[obj_id]
+                                gt_keypoints[obj_id, joint_id, :2] - gt_centers[obj_id]
+                            # TOCHECK: centernet's way [2]
+                            # ct_kps_target[obj_id, start_ind:end_ind] = \
+                            #     gt_keypoints[obj_id, joint_id, :2] - feat_gt_centers[obj_id]
                             ct_kps_target_mask[obj_id, start_ind:end_ind] = 1
 
                         local_heatmap = fake_heatmap[kp_target_inds]

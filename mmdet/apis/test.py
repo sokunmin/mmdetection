@@ -55,7 +55,7 @@ def single_gpu_test(model,
                     show=False,
                     out_dir=None,
                     show_score_thr=0.3,
-                    metrics=['bbox']):
+                    multitask=False):
     model.eval()
     results = []
     dataset = data_loader.dataset
@@ -94,7 +94,7 @@ def single_gpu_test(model,
                     score_thr=show_score_thr)
 
         # encode mask results
-        if isinstance(result[0], tuple) and metrics is not None and 'segm' in metrics:
+        if isinstance(result[0], tuple) and not multitask:
             result = [(bbox_results, encode_mask_results(mask_results))
                       for bbox_results, mask_results in result]
         results.extend(result)
@@ -104,7 +104,7 @@ def single_gpu_test(model,
     return results
 
 
-def multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
+def multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False, multitask=False):
     """Test model with multiple gpus.
 
     This method tests model with multiple gpus and collects the results
@@ -134,7 +134,7 @@ def multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
         with torch.no_grad():
             result = model(return_loss=False, rescale=True, **data)
             # encode mask results
-            if isinstance(result[0], tuple):
+            if isinstance(result[0], tuple) and not multitask:
                 result = [(bbox_results, encode_mask_results(mask_results))
                           for bbox_results, mask_results in result]
         results.extend(result)

@@ -34,8 +34,8 @@ model = dict(
     bbox_head=dict(
         type='TTFHead',
         in_channels=64,
-        feat_channels=(128, 64),
-        stacked_convs=(2, 1),
+        feat_channels=128,
+        stacked_convs=2,
         num_classes=1,
         offset_base=16,
         area_cfg=dict(
@@ -51,14 +51,14 @@ model = dict(
     keypoint_head=dict(
         type='TTFPoseHead',
         in_channels=64,
-        feat_channels=(128, 64),
-        stacked_convs=(2, 1),
+        feat_channels=128,
+        stacked_convs=2,
         num_classes=17,
         offset_base=16,
-        with_base_loc=False,
+        with_base_loc=True,
         loss_heatmap=dict(
             type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1),
-        loss_joint=dict(type='L1Loss', loss_weight=0.1)))
+        loss_joint=dict(type='SmoothL1Loss', loss_weight=0.01)))
 # training and testing settings
 train_cfg = dict(
     vis_every_n_iters=100,
@@ -122,17 +122,17 @@ data = dict(
         img_prefix=data_root + 'val2017/',
         pipeline=test_pipeline))
 # optimizer
-optimizer = dict(type='SGD', lr=0.016, momentum=0.9, weight_decay=0.0004,
-                 paramwise_cfg=dict(bias_lr_mult=2., bias_decay_mult=0.))
+optimizer = dict(type='Adam', lr=0.001)
 optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 # learning policy
 lr_config = dict(
     policy='step',
     warmup='linear',
-    warmup_iters=500,
+    warmup_iters=1000,
     warmup_ratio=1.0 / 5,
     step=[90, 110])
 checkpoint_config = dict(interval=1)
+evaluation = dict(interval=1, metric=['bbox', 'keypoints'], multitask=True)
 # yapf:enable
 cudnn_benchmark = True
 # runtime settings

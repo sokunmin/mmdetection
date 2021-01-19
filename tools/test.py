@@ -41,6 +41,7 @@ def parse_args():
         nargs='+',
         help='evaluation metrics, which depends on the dataset, e.g., "bbox",'
         ' "segm", "proposal" "keypoints" for COCO, and "mAP", "recall" for PASCAL VOC')
+    parser.add_argument('--multitask', action='store_true', help='multitask')
     parser.add_argument('--show', action='store_true', help='show results')
     parser.add_argument(
         '--show-dir', help='directory where painted images will be saved')
@@ -184,14 +185,14 @@ def main():
     if not distributed:
         model = MMDataParallel(model, device_ids=[0])
         outputs = single_gpu_test(model, data_loader, args.show, args.show_dir,
-                                  args.show_score_thr, args.eval)
+                                  args.show_score_thr, args.eval, multitask=args.multitask)
     else:
         model = MMDistributedDataParallel(
             model.cuda(),
             device_ids=[torch.cuda.current_device()],
             broadcast_buffers=False)
         outputs = multi_gpu_test(model, data_loader, args.tmpdir,
-                                 args.gpu_collect)
+                                 args.gpu_collect, multitask=args.multitask)
 
     rank, _ = get_dist_info()
     if rank == 0:
