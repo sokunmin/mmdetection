@@ -1589,7 +1589,7 @@ class RandomCenterCropPad(object):
                             bboxes = []
                             for m in results['gt_masks'].masks:
                                 bboxes.append(mask2polybox(m)[1])
-                            bboxes = np.array(bboxes)
+                            bboxes = np.array(bboxes, dtype=np.float32)
                             mask = self._filter_boxes(patch, bboxes, keypoints=results['gt_keypoints'])
                             bboxes = bboxes[mask]
                         else:

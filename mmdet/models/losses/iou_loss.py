@@ -463,13 +463,9 @@ class CenterGIoULoss(nn.Module):
         reduction = (
             reduction_override if reduction_override else self.reduction)
 
-        pos_mask = weight > 0  # (B, H, W)
-        weight = weight[pos_mask].float()  # (#pos,)
-        bboxes1 = pred[pos_mask].view(-1, 4)  # (B, H, W, 4) ∩ (#pos,) -> (#pos, 4)
-        bboxes2 = target[pos_mask].view(-1, 4)  # (B, H, W, 4) ∩ (#pos,) -> (#pos, 4)
         loss = self.loss_weight * ct_giou_loss(
-            bboxes1,
-            bboxes2,
+            pred,
+            target,
             weight,
             eps=self.eps,
             reduction=reduction,

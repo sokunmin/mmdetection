@@ -50,19 +50,19 @@ model = dict(
         loss_bbox=dict(type='CenterGIoULoss', loss_weight=5.0)),
     keypoint_head=dict(
         type='TTFPoseHead',
+        num_classes=17,
         in_channels=64,
         feat_channels=128,
         stacked_convs=2,
-        num_classes=17,
         offset_base=16,
-        with_base_loc=True,
         loss_heatmap=dict(
             type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1),
-        loss_joint=dict(type='SmoothL1Loss', loss_weight=0.01)))
+        loss_joint=dict(type='L1Loss', loss_weight=0.1)))
 # training and testing settings
 train_cfg = dict(
     vis_every_n_iters=100,
     min_overlap=0.7,
+    bodypart_thr=0.015,
     debug=False)
 test_cfg = dict(
     score_thr=0.01,
@@ -72,20 +72,33 @@ test_cfg = dict(
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 train_pipeline = [
-    dict(type='LoadImageFromFile'),
+    dict(type='LoadImageFromFile', to_float32=True),
     dict(type='LoadAnnotations',
          with_bbox=True,
          with_mask=True,
          with_keypoint=True),
+    dict(type='PhotoMetricDistortion',
+         brightness_delta=32,
+         contrast_range=(0.5, 1.5),
+         saturation_range=(0.5, 1.5),
+         hue_delta=18),
+    dict(type='RandomLighting', scale=0.1),
+    dict(type='RandomCenterCropPad',
+         crop_size=(512, 512),
+         ratios=(0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3),
+         test_mode=False,
+         test_pad_mode=None,
+         with_mask2bbox=True,
+         **img_norm_cfg),
     dict(type='Resize', img_scale=(512, 512), keep_ratio=False),
     dict(type='RandomFlip', flip_ratio=0.5),
-    dict(type='Normalize', **img_norm_cfg),
     dict(type='Pad', size_divisor=32),
+    dict(type='Normalize', **img_norm_cfg),
     dict(type='DefaultFormatBundle'),
-    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels', 'gt_masks', 'gt_keypoints']),
+    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels', 'gt_masks', 'gt_keypoints'])
 ]
 test_pipeline = [
-    dict(type='LoadImageFromFile'),
+    dict(type='LoadImageFromFile', to_float32=True),
     dict(
         type='MultiScaleFlipAug',
         img_scale=(512, 512),
@@ -93,12 +106,13 @@ test_pipeline = [
         transforms=[
             dict(type='Resize', keep_ratio=False),
             dict(type='RandomFlip'),
-            dict(type='Normalize', **img_norm_cfg),
             dict(type='Pad', size_divisor=32),
+            dict(type='Normalize', **img_norm_cfg),
             dict(type='ImageToTensor', keys=['img']),
             dict(type='Collect', keys=['img']),
         ])
 ]
+
 classes = ('person', )
 data = dict(
     samples_per_gpu=32,

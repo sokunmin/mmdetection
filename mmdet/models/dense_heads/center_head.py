@@ -188,17 +188,17 @@ class CenterHead(CornerHead):
                 preds: 
                     bbox=(ct_hm, ct_offset, ct_wh)
                 targets: 
-                    bbox=(heatmap, reg_target, wh_target, ind_target, target_mask)
+                    bbox=(heatmap, offset_target, wh_target, ct_target_mask, ct_ind_target)
                 metas: 
-                    bbox=(feat_gt_centers_int, gt_radius)
+                    bbox=(feat_gt_centers_int, feat_boxes_wh)
             ) -> (
                 ct_hm, ct_offset, ct_wh, 
-                hm_target, reg_target, wh_target, ct_ind_target, ct_target_mask,
+                hm_target, offset_target, wh_target, ct_target_mask, ct_ind_target
             )
             [OUT] -> loss(
                 pred_hm, pred_reg, pred_wh, 
-                hm_target, reg_target, wh_target, ct_ind_target, ct_target_mask,
-                gt_metas=(feat_gt_centers_int, gt_radius), 
+                hm_target, offset_target, wh_target, ct_target_mask, ct_ind_target
+                gt_metas=(feat_gt_centers_int, feat_boxes_wh), 
             )
             """
             pred_outs, targets, metas = inputs
@@ -221,13 +221,13 @@ class CenterHead(CornerHead):
     @force_fp32(apply_to=('pred_heatmap', 'pred_reg', 'pred_wh'))
     def loss(self,
              pred_hm,  # (B, #cls, H, W)
-             pred_reg,  # (B, 2, H, W)
+             pred_offset,  # (B, 2, H, W)
              pred_wh,  # (B, 2, H, W)
              hm_target,
-             reg_target,
+             offset_target,
              wh_target,
-             ct_ind_target,
              ct_target_mask,
+             ct_ind_target,
              gt_metas,
              img_metas,
              gt_bboxes_ignore=None,
@@ -249,11 +249,11 @@ class CenterHead(CornerHead):
                                  avg_factor=wh_mask.sum() + eps)
 
         # > offset loss
-        pred_reg = self._transpose_and_gather_feat(pred_reg, ct_ind_target)
-        reg_mask = ct_target_mask.expand_as(pred_reg).float()
-        loss_reg = self.loss_offset(pred_reg * reg_mask,
-                                    reg_target * reg_mask,
-                                    avg_factor=reg_mask.sum() + eps)
+        pred_offset = self._transpose_and_gather_feat(pred_offset, ct_ind_target)
+        ct_target_mask = ct_target_mask.expand_as(pred_offset).float()
+        loss_reg = self.loss_offset(pred_offset * ct_target_mask,
+                                    offset_target * ct_target_mask,
+                                    avg_factor=ct_target_mask.sum() + eps)
         return {'bbox/loss_heatmap': loss_cls, 'bbox/loss_reg': loss_reg, 'bbox/loss_wh': loss_wh}
 
     def get_targets(self,
@@ -277,7 +277,7 @@ class CenterHead(CornerHead):
         feat_shape = feat_shapes[0]
         with torch.no_grad():
             # `heatmap`: (B, #cls, H, W), `wh_target`: (B, 2, H, W), `reg_target`: (B, 2, H, W)
-            heatmap, reg_target, wh_target, ind_target, target_mask, feat_gt_centers_int, gt_radius = \
+            hm_target, offset_target, wh_target, ct_ind_target, ct_target_mask, feat_gt_centers_int, feat_boxes_wh = \
                 multi_apply(
                     self._get_targets_single,
                     gt_boxes,  # (B, #obj, 4)
@@ -285,12 +285,13 @@ class CenterHead(CornerHead):
                     img_shape=img_shape,  # (img_H, img_W)
                     feat_shape=feat_shape  # (H, W)
                 )
-            heatmap = torch.stack(heatmap, dim=0)
-            reg_target = torch.stack(reg_target, dim=0)
+            hm_target = torch.stack(hm_target, dim=0)
+            offset_target = torch.stack(offset_target, dim=0)
             wh_target = torch.stack(wh_target, dim=0)
-            ind_target = torch.stack(ind_target, dim=0).to(torch.long)
-            target_mask = torch.stack(target_mask, dim=0)
-            return (heatmap, reg_target, wh_target, ind_target, target_mask), (feat_gt_centers_int, gt_radius)
+            ct_ind_target = torch.stack(ct_ind_target, dim=0).to(torch.long)
+            ct_target_mask = torch.stack(ct_target_mask, dim=0)
+            return (hm_target, offset_target, wh_target, ct_target_mask, ct_ind_target), \
+                   (feat_gt_centers_int, feat_boxes_wh)
 
     def _get_targets_single(self,
                             gt_boxes,
@@ -316,7 +317,7 @@ class CenterHead(CornerHead):
         num_objs = gt_boxes.size(0)
         # `H/W`: 128
         hm_target = gt_boxes.new_zeros(self.num_classes, feat_h, feat_w)  # > (#cls, H, W)
-        reg_target = gt_boxes.new_zeros(self.max_objs, 2)  # > (#max_obj, 2)
+        offset_target = gt_boxes.new_zeros(self.max_objs, 2)  # > (#max_obj, 2)
         wh_target = gt_boxes.new_zeros(self.max_objs, 2)  # > (#max_obj, 2)
         ct_ind_target = gt_boxes.new_zeros(self.max_objs, dtype=torch.int64)  # > (#max_obj,)
         ct_target_mask = gt_boxes.new_zeros(self.max_objs, dtype=torch.uint8)  # > (#max_obj,)
@@ -330,24 +331,25 @@ class CenterHead(CornerHead):
             feat_gt_boxes[:, [1, 3]], min=0, max=feat_h - 1)  # y_min, y_max
         feat_gt_centers = (feat_gt_boxes[:, :2] + feat_gt_boxes[:, 2:]) / 2  # > (#obj, 2)
         feat_gt_centers_int = feat_gt_centers.to(torch.int)  # > (#obj, 2)
+        # > target metas
         ct_ind_target[:num_objs] = feat_gt_centers_int[..., 1] * feat_h + feat_gt_centers_int[..., 0]
-        reg_target[:num_objs] = feat_gt_centers - feat_gt_centers_int
+        offset_target[:num_objs] = feat_gt_centers - feat_gt_centers_int
         ct_target_mask[:num_objs] = 1
 
-        feat_gt_wh = torch.zeros_like(feat_gt_centers)  # > (#obj, 2)
-        feat_gt_wh[..., 0] = feat_gt_boxes[:, 2] - feat_gt_boxes[:, 0]
-        feat_gt_wh[..., 1] = feat_gt_boxes[:, 3] - feat_gt_boxes[:, 1]
-        wh_target[:num_objs] = feat_gt_wh
-        gt_radius = gt_boxes.new_zeros(num_objs, dtype=torch.int32)
+        feat_boxes_wh = torch.zeros_like(feat_gt_centers)  # > (#obj, 2)
+        feat_boxes_wh[..., 0] = feat_gt_boxes[:, 2] - feat_gt_boxes[:, 0]
+        feat_boxes_wh[..., 1] = feat_gt_boxes[:, 3] - feat_gt_boxes[:, 1]
+        wh_target[:num_objs] = feat_boxes_wh
+
         for box_id in range(num_objs):
-            radius = gaussian_radius(feat_gt_wh[box_id], min_overlap=self.train_cfg.min_overlap)
+            radius = gaussian_radius(feat_boxes_wh[box_id], min_overlap=self.train_cfg.min_overlap)
             radius = max(0, int(radius))
             cls_ind = gt_labels[box_id]
-            gt_radius[box_id] = radius
             hm_target[cls_ind] = gen_gaussian_target(heatmap=hm_target[cls_ind],
                                                      center=feat_gt_centers_int[box_id],
                                                      radius=radius)
-        return hm_target, reg_target, wh_target, ct_ind_target, ct_target_mask, feat_gt_centers_int, gt_radius
+        return hm_target, offset_target, wh_target, ct_ind_target, ct_target_mask, \
+               feat_gt_centers_int, feat_boxes_wh
 
 
 @HEADS.register_module()
@@ -459,26 +461,18 @@ class CenterPoseHead(CornerHead):
                       img_metas,
                       rescale=False,
                       with_nms=True):
-        pred_kp_hm, pred_kp_reg, pred_ct_kps = keypoint_outs
+        pred_kp_hm, pred_kp_offset, pred_ct_kps = keypoint_outs
         bbox_scores, feat_bboxes, ct_inds, ct_xs, ct_ys = bbox_metas
         batch, _, feat_h, feat_w = pred_kp_hm.size()
         num_topk = self.test_cfg.max_per_img
         num_joints = self.num_classes
         kp_hm = pred_kp_hm.detach().sigmoid_()  # > (B, #kps, H, W)
-        kp_offset = pred_kp_reg.detach()  # > (B, 2, H, W)
+        kp_offset = pred_kp_offset.detach()  # > (B, 2, H, W)
         ct_kps = pred_ct_kps.detach()  # > (B, #kps x 2, H, W)
 
         # > keypoint heatmaps
         kp_hm = self._local_maximum(kp_hm, kernel=3)
         kp_scores, kp_inds, kp_ys, kp_xs = self._keypoint_topk(kp_hm, k=num_topk)
-
-        # > offsets of center to keypoints
-        ct_kps = self._transpose_and_gather_feat(ct_kps, ct_inds)  # (B, K, 34)
-        ct_kps = ct_kps.view(batch, num_topk, num_joints * 2)
-        ct_kps[..., 0::2] += ct_xs.view(batch, num_topk, 1).expand(batch, num_topk, num_joints)
-        ct_kps[..., 1::2] += ct_ys.view(batch, num_topk, 1).expand(batch, num_topk, num_joints)
-        # > (B, K, #kps, 2) -> (B, #kps, K, 2)
-        ct_kps = ct_kps.view(batch, num_topk, num_joints, 2).permute(0, 2, 1, 3).contiguous()
 
         # > keypoint regressed locations
         kp_offset = self._transpose_and_gather_feat(kp_offset, kp_inds.view(batch, -1))
@@ -487,12 +481,20 @@ class CenterPoseHead(CornerHead):
         kp_ys += kp_offset[..., 1]
 
         # > keep positives
-        mask = (kp_scores > self.test_cfg.kp_score_thr).float()  # (B, #kps, K)
-        kp_scores = (1 - mask) * -1 + mask * kp_scores
-        kp_xs = (1 - mask) * (-10000) + mask * kp_xs
-        kp_ys = (1 - mask) * (-10000) + mask * kp_ys
-        kp_kps = torch.stack([kp_xs, kp_ys], dim=-1)
+        scores_mask = (kp_scores > self.test_cfg.kp_score_thr).float()  # (B, #kps, K)
+        kp_scores = (1 - scores_mask) * -1 + scores_mask * kp_scores
+        kp_xs = (1 - scores_mask) * (-10000) + scores_mask * kp_xs
+        kp_ys = (1 - scores_mask) * (-10000) + scores_mask * kp_ys
+        kp_kps = torch.stack([kp_xs, kp_ys], dim=-1)  # > (B, #kps, K, 2)
 
+        # > offsets of center to keypoints
+        ct_kps = self._transpose_and_gather_feat(ct_kps, ct_inds)  # (B, K, 34)
+        ct_kps[..., 0::2] += ct_xs.unsqueeze(-1)
+        ct_kps[..., 1::2] += ct_ys.unsqueeze(-1)
+        # > (B, K, #kps, 2) -> (B, #kps, K, 2)
+        ct_kps = ct_kps.view(batch, num_topk, num_joints, 2).permute(0, 2, 1, 3).contiguous()
+
+        # NOTE: keypoints are on feature-map scale
         det_kps, det_scores = self._assign_keypoints_to_instance(
             ct_kps, kp_kps, feat_bboxes, kp_scores, self.test_cfg.kp_score_thr)
 
@@ -517,12 +519,10 @@ class CenterPoseHead(CornerHead):
                              feat_size,
                              rescale=False,
                              with_nms=True):
-        pad_h, pad_w = img_meta['pad_shape'][:2]
         num_topk = self.test_cfg.max_per_img
-        width_ratio = float(feat_size[1] / pad_w)
-        height_ratio = float(feat_size[0] / pad_h)
-        keypoints[..., 0] /= width_ratio
-        keypoints[..., 1] /= height_ratio
+        size_stride = keypoints.new_tensor([float(img_meta['pad_shape'][1] / feat_size[1]),  # > 4
+                                            float(img_meta['pad_shape'][0] / feat_size[0])])
+        keypoints *= size_stride
         if rescale:
             scale_factor = img_meta['scale_factor'][:2]
             keypoints /= keypoints.new_tensor(scale_factor)
@@ -553,14 +553,14 @@ class CenterPoseHead(CornerHead):
                     keypoint=(kp_hm, kp_reg, ct_kp_reg)
                 gts: (gt_bboxes, gt_masks, gt_keypoints, gt_labels)
                 metas: 
-                    bbox=(feat_gt_centers_int, gt_radius)
+                    bbox=(feat_gt_centers_int, feat_boxes_wh)
             ) -> (
                 (gt_keypoints, gt_labels),
-                (feat_gt_centers_int, gt_radius)
+                (feat_gt_centers_int, feat_boxes_wh)
             )
             [OUT] -> get_targets(
                 gt_inputs: (gt_keypoints, gt_labels)
-                boxes_meta: (feat_gt_centers_int, gt_radius)
+                boxes_meta: (feat_gt_centers_int, feat_boxes_wh)
             )
             """
             pred_outs, gt_inputs, metas = inputs
@@ -600,25 +600,25 @@ class CenterPoseHead(CornerHead):
                     bbox=(ct_hm, ct_offset, ct_wh)
                     keypoint=(kp_hm, kp_reg, ct_kp_reg)
                 targets:
-                    bbox=(hm_target, reg_target, wh_target, ind_target, target_mask)
-                    keypoint=(hm_target, reg_target, ct2kps_target, reg_ind_target, target_reg_mask, target_ck2kps_mask)
+                    bbox=(hm_target, offset_target, wh_target, ct_target_mask, ct_ind_target)
+                    keypoint=(hm_target, offset_target, ct2kps_target, offset_ind_target, offset_target_mask, ck2kps_target_mask)
                 metas:
-                    bbox=(feat_gt_centers_int, gt_radius)
+                    bbox=(feat_gt_centers_int, feat_boxes_wh)
                     keypoint=None
             ) -> (
                 kp_hm, kp_reg, ct_kp_reg,
-                hm_target, reg_target, ct2kps_target, reg_ind_target, reg_target_mask, ck2kps_target_mask,
+                hm_target, offset_target, ct2kps_target, offset_ind_target, offset_target_mask, ck2kps_target_mask,
                 ct_ind_target
             )
             [OUT] -> loss(
-                pred_hm, pred_reg, pred_ct2kps,
-                hm_target, reg_target, ct2kps_target, reg_ind_target, reg_target_mask, ck2kps_target_mask,
+                pred_hm, pred_offset, pred_ct2kps,
+                hm_target, offset_target, ct2kps_target, offset_ind_target, offset_target_mask, ck2kps_target_mask,
                 ct_ind_target
             ) 
             """
             pred_outs, targets, metas = inputs
             keypoint_targets = targets['keypoint']
-            bbox_ind_target = targets['bbox'][3]
+            bbox_ind_target = targets['bbox'][-1]
             new_inputs = pred_outs + keypoint_targets + (bbox_ind_target,)
         else:
             # `TEST`
@@ -639,13 +639,13 @@ class CenterPoseHead(CornerHead):
     @force_fp32(apply_to=('pred_hm', 'pred_reg', 'pred_ct2kps'))
     def loss(self,
              pred_hm,  # (B, #joints, H, W)
-             pred_reg,  # (B, 2, H, W)
+             pred_offset,  # (B, 2, H, W)
              pred_ct2kps,  # (B, #joints x 2, H, W)
              hm_target,
-             reg_target,
+             offset_target,
              ct2kps_target,
-             reg_ind_target,
-             reg_target_mask,
+             offset_ind_target,
+             offset_target_mask,
              ck2kps_target_mask,
              ct_ind_target,
              img_metas,
@@ -667,12 +667,12 @@ class CenterPoseHead(CornerHead):
                                      avg_factor=ct2kps_mask.sum() + eps)
 
         # > offset loss
-        pred_reg = self._transpose_and_gather_feat(pred_reg, reg_ind_target)
-        reg_mask = reg_target_mask.unsqueeze(2).expand_as(pred_reg).float()
-        loss_reg = self.loss_offset(pred_reg * reg_mask,
-                                    reg_target * reg_mask,
-                                    avg_factor=reg_mask.sum() + eps)
-        return {'keypoint/loss_heatmap': loss_hm, 'keypoint/loss_reg': loss_reg, 'keypoint/loss_joint': loss_joint}
+        pred_offset = self._transpose_and_gather_feat(pred_offset, offset_ind_target)
+        offset_mask = offset_target_mask.unsqueeze(2).expand_as(pred_offset).float()
+        loss_offset = self.loss_offset(pred_offset * offset_mask,
+                                       offset_target * offset_mask,
+                                       avg_factor=offset_mask.sum() + eps)
+        return {'keypoint/loss_heatmap': loss_hm, 'keypoint/loss_offset': loss_offset, 'keypoint/loss_joint': loss_joint}
 
     def get_targets(self,
                     gt_inputs,
@@ -683,7 +683,7 @@ class CenterPoseHead(CornerHead):
         """
         Args:
             gt_inputs: (gt_keypoints, gt_labels).
-            box_metas: (feat_gt_centers_int, gt_radius)
+            box_metas: (feat_gt_centers_int, feat_boxes_wh)
             feat_shapes: tuple
             img_metas: list(dict).
 
@@ -693,30 +693,30 @@ class CenterPoseHead(CornerHead):
             reg_weight: tensor, same as box_target.
         """
         gt_keypoints, gt_labels = gt_inputs
-        feat_gt_centers_int, gt_radius = box_metas
+        feat_gt_centers_int, feat_boxes_wh = box_metas[0], box_metas[1]
         img_shape = img_metas[0]['img_shape'][:2]
         feat_shape = feat_shapes[0]  # > (#level, 2)
         with torch.no_grad():
-            heatmap, reg_target, ct2kps_target, reg_ind_target, reg_target_mask, ck2kps_target_mask = multi_apply(
+            heatmap, offset_target, ct2kps_target, offset_ind_target, offset_target_mask, ck2kps_target_mask = multi_apply(
                 self._get_targets_single,
                 gt_keypoints,
-                gt_radius,  # (B, #obj, 4)
                 feat_gt_centers_int,
+                feat_boxes_wh,  # (B, #obj, 2)
                 img_shape=img_shape,  # (img_H, img_W)
                 feat_shape=feat_shape  # (H, W)
             )
             heatmap = torch.stack(heatmap, dim=0)
-            reg_target = torch.stack(reg_target, dim=0)
+            offset_target = torch.stack(offset_target, dim=0)
             ct2kps_target = torch.stack(ct2kps_target, dim=0)
-            reg_ind_target = torch.stack(reg_ind_target, dim=0).to(torch.long)
-            reg_target_mask = torch.stack(reg_target_mask, dim=0)
+            offset_ind_target = torch.stack(offset_ind_target, dim=0).to(torch.long)
+            offset_target_mask = torch.stack(offset_target_mask, dim=0)
             ck2kps_target_mask = torch.stack(ck2kps_target_mask, dim=0)
-            return (heatmap, reg_target, ct2kps_target, reg_ind_target, reg_target_mask, ck2kps_target_mask), None
+            return (heatmap, offset_target, ct2kps_target, offset_ind_target, offset_target_mask, ck2kps_target_mask), None
 
     def _get_targets_single(self,
                             gt_keypoints,
-                            gt_radius,
                             feat_gt_centers_int,
+                            feat_boxes_wh,
                             img_shape,
                             feat_shape,
                             **kwargs):
@@ -733,27 +733,42 @@ class CenterPoseHead(CornerHead):
             box_target: tensor, tensor <=> img, (4, h, w) or (80 * 4, h, w).
             reg_weight: tensor, same as box_target
         """
-        img_h, img_w = img_shape  # > input size: (512, 512)
-        feat_h, feat_w = feat_shape  # > feat size: (128, 128)
-        width_ratio = float(feat_w / img_w)  # > 0.25
-        height_ratio = float(feat_h / img_h)
+        size_strides = torch.tensor([float(img_shape[1] / feat_shape[1]),
+                                     float(img_shape[0] / feat_shape[0])],
+                                    dtype=gt_keypoints.dtype,
+                                    device=gt_keypoints.device)
+        joint_target = self._get_joint_target(gt_keypoints,
+                                              feat_gt_centers_int,
+                                              feat_boxes_wh,
+                                              feat_shape=feat_shape,
+                                              size_strides=size_strides)
+        return joint_target
+
+    def _get_joint_target(self,
+                          gt_keypoints,
+                          feat_gt_centers_int,  # (#obj, 2)
+                          feat_boxes_wh,
+                          feat_shape,
+                          size_strides,
+                          **kwargs):
+        feat_h, feat_w = feat_shape
         num_objs = gt_keypoints.size(0)
         num_joints = self.num_classes
-        # `H/W`: 128
         hm_target = gt_keypoints.new_zeros(num_joints, feat_h, feat_w)  # > (#joint, H, W)
-        reg_target = gt_keypoints.new_zeros(self.max_objs * num_joints, 2)  # > (#max_obj x #joint, 2)
+        offset_target = gt_keypoints.new_zeros(self.max_objs * num_joints, 2)  # > (#max_obj x #joint, 2)
+        offset_ind_target = gt_keypoints.new_zeros(self.max_objs * num_joints, dtype=torch.int64)  # > (#max_obj x #joint,)
+        offset_target_mask = gt_keypoints.new_zeros(self.max_objs * num_joints, dtype=torch.int64)  # > (#max_obj,)
         ct2kps_target = gt_keypoints.new_zeros(self.max_objs, num_joints * 2)  # > (#max_obj, #joint x 2)
-        reg_ind_target = gt_keypoints.new_zeros(self.max_objs * num_joints, dtype=torch.int64)  # > (#max_obj x #joint,)
-        reg_target_mask = gt_keypoints.new_zeros(self.max_objs * num_joints, dtype=torch.int64)  # > (#max_obj,)
         ct2kps_target_mask = gt_keypoints.new_zeros(self.max_objs, num_joints * 2, dtype=torch.uint8)  # > (#max_obj,)
 
         feat_gt_keypoints = gt_keypoints.clone()  # > (#obj, #joints(x,y,v))
-        feat_gt_keypoints[..., 0] *= width_ratio
-        feat_gt_keypoints[..., 1] *= height_ratio
+        feat_gt_keypoints[..., :2] /= size_strides
 
         for obj_id in range(num_objs):
             feat_obj_keypoints = feat_gt_keypoints[obj_id]
-            radius = gt_radius[obj_id]
+            kp_radius = gaussian_radius(feat_boxes_wh[obj_id],
+                                        min_overlap=self.train_cfg.min_overlap)
+            kp_radius = max(0, int(kp_radius))
             for joint_id in range(num_joints):
                 if feat_obj_keypoints[joint_id, 2] > 0:
                     joint_xy = feat_obj_keypoints[joint_id, :2]
@@ -761,12 +776,12 @@ class CenterPoseHead(CornerHead):
                     if 0 <= joint_xy[0] < feat_w and 0 <= joint_xy[1] < feat_h:
                         start_ind, end_ind = joint_id * 2, joint_id * 2 + 2
                         obj_joint_ind = obj_id * num_joints + joint_id
-                        reg_target[obj_joint_ind] = joint_xy - joint_xy_int
-                        reg_ind_target[obj_joint_ind] = joint_xy_int[1] * feat_h + joint_xy_int[0]
-                        reg_target_mask[obj_joint_ind] = 1
+                        offset_target[obj_joint_ind] = joint_xy - joint_xy_int
+                        offset_ind_target[obj_joint_ind] = joint_xy_int[1] * feat_h + joint_xy_int[0]
+                        offset_target_mask[obj_joint_ind] = 1
                         ct2kps_target[obj_id, start_ind:end_ind] = joint_xy - feat_gt_centers_int[obj_id]
                         ct2kps_target_mask[obj_id, start_ind:end_ind] = 1
-                        hm_target[joint_id] = gen_gaussian_target(heatmap=hm_target[joint_id],
-                                                                   center=joint_xy_int,
-                                                                   radius=int(radius))
-        return hm_target, reg_target, ct2kps_target, reg_ind_target, reg_target_mask, ct2kps_target_mask
+                        hm_target[joint_id] = gen_gaussian_target(hm_target[joint_id],
+                                                                  joint_xy_int,
+                                                                  radius=int(kp_radius))
+        return hm_target, offset_target, ct2kps_target, offset_ind_target, offset_target_mask, ct2kps_target_mask
