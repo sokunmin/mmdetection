@@ -116,10 +116,7 @@ class TTFHead(CenterHead):
                 rescale=rescale,
                 with_nms=with_nms
             ))
-        if self.with_centerpose:
-            bboxes[..., [0, 2]] /= width_stride
-            bboxes[..., [1, 3]] /= height_stride
-        else:
+        if not self.with_centerpose:
             ct_xs = refined_ct_xs
             ct_ys = refined_ct_ys
         return result_list, (scores, bboxes, ct_inds, ct_xs, ct_ys)
@@ -374,11 +371,11 @@ class TTFHead(CenterHead):
         feat_boxes_wh = torch.stack([feat_gt_ws, feat_gt_hs], dim=1)
         # we calc the center and ignore area based on the gt-boxes of the origin scale
         # no peak will fall between pixels
-        gt_centers = torch.stack([(gt_boxes[:, 0] + gt_boxes[:, 2]) / 2,
-                                  (gt_boxes[:, 1] + gt_boxes[:, 3]) / 2], dim=1)
-        feat_gt_centers_int = torch.zeros_like(gt_centers)
-        feat_gt_centers_int[:, 0] = (gt_centers[:, 0] * width_ratio)  # (#obj, 2)
-        feat_gt_centers_int[:, 1] = (gt_centers[:, 1] * height_ratio)
+        feat_gt_centers = torch.stack([(gt_boxes[:, 0] + gt_boxes[:, 2]) / 2,
+                                       (gt_boxes[:, 1] + gt_boxes[:, 3]) / 2], dim=1)
+        feat_gt_centers_int = torch.zeros_like(feat_gt_centers)
+        feat_gt_centers_int[:, 0] = (feat_gt_centers[:, 0] * width_ratio)  # (#obj, 2)
+        feat_gt_centers_int[:, 1] = (feat_gt_centers[:, 1] * height_ratio)
         feat_gt_centers_int = feat_gt_centers_int.to(torch.int)  # (#obj, 2)
 
         ct_ind_target = gt_boxes.new_zeros(128, dtype=torch.int64)
@@ -728,29 +725,7 @@ class TTFPoseHead(CenterPoseHead):
                                               boxes_area_topk_log,
                                               feat_shape=feat_shape,
                                               size_strides=size_strides)
-        # > limb_hm_target
-        # body_target = self._get_bodypart_target(gt_keypoints,
-        #                                         feat_boxes_wh,
-        #                                         feat_shape=feat_shape,
-        #                                         size_strides=size_strides)
         return joint_target
-
-    def get_points(self,
-                   featmap_size,
-                   stride,
-                   dtype,
-                   device):
-        assert isinstance(featmap_size, tuple)
-        assert len(stride) == 2
-        h, w = featmap_size
-        w_stride, h_stride = stride
-        x_range = torch.arange(0, (w - 1) * w_stride + 1, w_stride,
-                               dtype=dtype, device=device)
-        y_range = torch.arange(0, (h - 1) * h_stride + 1, h_stride,
-                               dtype=dtype, device=device)
-        y, x = torch.meshgrid(y_range, x_range)
-        points = torch.stack((x, y), dim=0)  # (2, h, w)
-        return points
 
     def _get_joint_target(self,
                           gt_keypoints,
@@ -805,66 +780,3 @@ class TTFPoseHead(CenterPoseHead):
                         local_heatmap *= boxes_area_topk_log[obj_id]
                         reg_weight[start_ind:end_ind, box_target_inds] = local_heatmap / ct_div
         return kp_hm_target, ct_kps_target, reg_weight
-
-    def _get_bodypart_target(self,
-                             gt_keypoints,
-                             feat_boxes_wh,  # (#obj, 2)
-                             feat_shape,
-                             size_strides):
-        num_objs = gt_keypoints.size(0)
-        feat_h, feat_w = feat_shape
-        points = self.get_points(feat_shape,
-                                 stride=size_strides,
-                                 dtype=torch.float32,
-                                 device=gt_keypoints.device).permute(1, 2, 0)
-        body_hm_target = gt_keypoints.new_zeros(18, feat_h, feat_w)  # TOADD: 18 as param
-        hm_count = gt_keypoints.new_zeros(feat_shape, dtype=torch.int32)
-        # `gt_keypoints`: (#obj, #kps, 3)
-        joints_visibility = gt_keypoints[..., 2] > 0
-        for limb_id, (fr, to) in enumerate(self.limbs):
-            v = joints_visibility[:, fr] & joints_visibility[:, to]
-            # > two points of a pair must both exist
-            joint_fr = gt_keypoints[v, fr, :2]
-            joint_to = gt_keypoints[v, to, :2]
-            d_norm = (joint_to - joint_fr).pow(2).sum(dim=1)
-            min_fr, max_to = torch.min(joint_fr, joint_to), torch.max(joint_fr, joint_to)
-
-            for obj_id in range(num_objs):  # iterate limbs over all objects
-                radius = gaussian_radius(feat_boxes_wh[obj_id],
-                                         min_overlap=self.train_cfg.min_overlap)
-                radius = max(0, int(radius))
-                sigma = 2 * (radius + 2)
-                num_visible_limbs = v.sum().item()
-                hm_count = hm_count.zero_()
-                for v_limb_id in range(num_visible_limbs):
-                    min_fr_xy = ((min_fr[v_limb_id] - sigma) / size_strides).round().int().clamp(min=0)
-                    max_to_xy = ((max_to[v_limb_id] + sigma) / size_strides).round().int()
-                    valid_limb = (d_norm[v_limb_id] > 0) & (max_to_xy >= 0)
-                    if valid_limb.all():
-                        max_to_xy += 1
-                        fr_xy, to_xy = joint_fr[v_limb_id], joint_to[v_limb_id]
-                        limb_len = self._get_limb_length(fr_xy, to_xy, min_fr_xy, max_to_xy, points)
-                        limb_gaussian = self._gen_limb_gaussian(limb_len, 0, sigma)
-                        limb_gaussian[limb_gaussian <= self.train_cfg.bodypart_thr] = 0.01
-                        (min_x, min_y), (max_x, max_y) = min_fr_xy, max_to_xy
-                        body_hm_target[limb_id, min_y:max_y, min_x:max_x] += limb_gaussian
-                        hm_count[min_y:max_y, min_x:max_x] += 1
-                hm_count_keep = hm_count > 0
-                body_hm_target[limb_id][hm_count_keep] /= hm_count[hm_count_keep]
-        return body_hm_target
-
-    def _get_limb_length(self, pt1_xy, pt2_xy, min_xy, max_xy, points):
-        (min_x, min_y), (max_x, max_y) = min_xy, max_xy
-        x_ranges = points[min_y:max_y, min_x:max_x, 0]
-        y_ranges = points[min_y:max_y, min_x:max_x, 1]
-        d = pt2_xy - pt1_xy
-        dx = pt1_xy[0] - x_ranges
-        dy = pt1_xy[1] - y_ranges
-        norm = d.pow(2).sum().sqrt()
-        dist = ((d[0] * dy - d[1] * dx) / (norm + 1e-6)).abs()
-        return dist
-
-    def _gen_limb_gaussian(self, x, u, sigma=1):
-        variance = 2 * sigma ** 2
-        y = (-(x - u) ** 2 / variance).exp()
-        return y

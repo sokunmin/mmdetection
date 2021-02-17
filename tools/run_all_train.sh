@@ -50,6 +50,8 @@ do
     echo "> NO_VALID = ${NO_VALID}"
     echo "> DELETE_OLD = ${DELETE_OLD}"
 
+    sleep 10
+
     # > delete old checkpoints
     if [[ "${DELETE_OLD}" == "true" ]] ; then
         echo "> <<DELETE>> old checkpoints"

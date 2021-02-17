@@ -65,6 +65,8 @@ do
         exit 0
     fi
 
+    sleep 10
+
     OUTPUT_LOG_TXT=${WORK_DIR}/${LOG_TXT}
     rm -rf ${OUTPUT_LOG_TXT}
 

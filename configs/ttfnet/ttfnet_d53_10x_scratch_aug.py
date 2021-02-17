@@ -1,4 +1,4 @@
-_base_ = './ttfnet_d53_aug_10x.py'
+_base_ = './ttfnet_d53_10x_aug.py'
 
 # model settings
 model = dict(
@@ -16,10 +16,10 @@ model = dict(
     neck=None,
     bbox_head=dict(
         type='TTFHead',
+        num_classes=80,
         in_channels=128,
         feat_channels=(128, 64),
         stacked_convs=(2, 2),
-        num_classes=80,
         offset_base=16,
         area_cfg=dict(
             type='log',

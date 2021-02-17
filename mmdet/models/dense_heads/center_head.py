@@ -362,20 +362,24 @@ class CenterPoseHead(CornerHead):
                  max_objs=128,
                  upsample_cfg=None,
                  loss_joint=None,
+                 with_limbs=False,
                  **kwargs):
         self.stacked_convs = stacked_convs
         self.feat_channels = feat_channels
         self.upsample_cfg = upsample_cfg
         self.max_objs = max_objs
-        super(CenterPoseHead, self).__init__(*args, **kwargs)
-        self.loss_joint = build_loss(loss_joint)
-        self.loss_embedding = None
-        self.fp16_enabled = False
         self.limbs = [[0, 1], [0, 2], [1, 3], [2, 4],
                       [3, 5], [4, 6], [5, 6],
                       [5, 7], [7, 9], [6, 8], [8, 10],
                       [5, 11], [6, 12], [11, 12],
                       [11, 13], [13, 15], [12, 14], [14, 16]]
+        self.with_limbs = with_limbs
+        super(CenterPoseHead, self).__init__(*args, **kwargs)
+        self.loss_joint = build_loss(loss_joint)
+        self.loss_bodypart = build_loss(dict(
+            type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=0.1))
+        self.loss_embedding = None
+        self.fp16_enabled = False
 
     def build_head(self, in_channel, feat_channel, stacked_convs, out_channel):
         head_convs = [ConvModule(
@@ -471,7 +475,7 @@ class CenterPoseHead(CornerHead):
         ct_kps = pred_ct_kps.detach()  # > (B, #kps x 2, H, W)
 
         # > keypoint heatmaps
-        kp_hm = self._local_maximum(kp_hm, kernel=3)
+        kp_hm = self._local_maximum(kp_hm, kernel=3)  # > (B, #kps, H, W)
         kp_scores, kp_inds, kp_ys, kp_xs = self._keypoint_topk(kp_hm, k=num_topk)
 
         # > keypoint regressed locations
@@ -647,6 +651,8 @@ class CenterPoseHead(CornerHead):
              offset_ind_target,
              offset_target_mask,
              ck2kps_target_mask,
+             # limb_target,
+             # limb_target_mask,
              ct_ind_target,
              img_metas,
              gt_bboxes_ignore=None,
@@ -666,13 +672,17 @@ class CenterPoseHead(CornerHead):
                                      ct2kps_target * ct2kps_mask,
                                      avg_factor=ct2kps_mask.sum() + eps)
 
+        # > limb loss  # TOCHECK: `target_inds`
+
         # > offset loss
         pred_offset = self._transpose_and_gather_feat(pred_offset, offset_ind_target)
         offset_mask = offset_target_mask.unsqueeze(2).expand_as(pred_offset).float()
         loss_offset = self.loss_offset(pred_offset * offset_mask,
                                        offset_target * offset_mask,
                                        avg_factor=offset_mask.sum() + eps)
-        return {'keypoint/loss_heatmap': loss_hm, 'keypoint/loss_offset': loss_offset, 'keypoint/loss_joint': loss_joint}
+        return {'keypoint/loss_heatmap': loss_hm,
+                'keypoint/loss_offset': loss_offset,
+                'keypoint/loss_joint': loss_joint}
 
     def get_targets(self,
                     gt_inputs,
@@ -696,22 +706,46 @@ class CenterPoseHead(CornerHead):
         feat_gt_centers_int, feat_boxes_wh = box_metas[0], box_metas[1]
         img_shape = img_metas[0]['img_shape'][:2]
         feat_shape = feat_shapes[0]  # > (#level, 2)
-        with torch.no_grad():
-            heatmap, offset_target, ct2kps_target, offset_ind_target, offset_target_mask, ck2kps_target_mask = multi_apply(
-                self._get_targets_single,
-                gt_keypoints,
-                feat_gt_centers_int,
-                feat_boxes_wh,  # (B, #obj, 2)
-                img_shape=img_shape,  # (img_H, img_W)
-                feat_shape=feat_shape  # (H, W)
-            )
-            heatmap = torch.stack(heatmap, dim=0)
-            offset_target = torch.stack(offset_target, dim=0)
-            ct2kps_target = torch.stack(ct2kps_target, dim=0)
-            offset_ind_target = torch.stack(offset_ind_target, dim=0).to(torch.long)
-            offset_target_mask = torch.stack(offset_target_mask, dim=0)
-            ck2kps_target_mask = torch.stack(ck2kps_target_mask, dim=0)
-            return (heatmap, offset_target, ct2kps_target, offset_ind_target, offset_target_mask, ck2kps_target_mask), None
+        if self.with_limbs:
+            self.limbs = torch.tensor(self.limbs, dtype=torch.long)
+            with torch.no_grad():
+                heatmap, offset_target, ct2kps_target, offset_ind_target, offset_target_mask, ck2kps_target_mask, limb_target, limb_target_mask = multi_apply(
+                    self._get_targets_single,
+                    gt_keypoints,
+                    feat_gt_centers_int,
+                    feat_boxes_wh,  # (B, #obj, 2)
+                    img_shape=img_shape,  # (img_H, img_W)
+                    feat_shape=feat_shape  # (H, W)
+                )
+                heatmap = torch.stack(heatmap, dim=0)
+                offset_target = torch.stack(offset_target, dim=0)
+                ct2kps_target = torch.stack(ct2kps_target, dim=0)
+                offset_ind_target = torch.stack(offset_ind_target, dim=0).to(torch.long)
+                offset_target_mask = torch.stack(offset_target_mask, dim=0)
+                ck2kps_target_mask = torch.stack(ck2kps_target_mask, dim=0)
+                limb_target = torch.stack(limb_target, dim=0)
+                limb_target_mask = torch.stack(limb_target_mask, dim=0)
+                return (heatmap, offset_target, ct2kps_target,
+                        offset_ind_target, offset_target_mask, ck2kps_target_mask,
+                        limb_target, limb_target_mask), None
+        else:
+            with torch.no_grad():
+                heatmap, offset_target, ct2kps_target, offset_ind_target, offset_target_mask, ck2kps_target_mask = multi_apply(
+                    self._get_targets_single,
+                    gt_keypoints,
+                    feat_gt_centers_int,
+                    feat_boxes_wh,  # (B, #obj, 2)
+                    img_shape=img_shape,  # (img_H, img_W)
+                    feat_shape=feat_shape  # (H, W)
+                )
+                heatmap = torch.stack(heatmap, dim=0)
+                offset_target = torch.stack(offset_target, dim=0)
+                ct2kps_target = torch.stack(ct2kps_target, dim=0)
+                offset_ind_target = torch.stack(offset_ind_target, dim=0).to(torch.long)
+                offset_target_mask = torch.stack(offset_target_mask, dim=0)
+                ck2kps_target_mask = torch.stack(ck2kps_target_mask, dim=0)
+                return (heatmap, offset_target, ct2kps_target,
+                        offset_ind_target, offset_target_mask, ck2kps_target_mask), None
 
     def _get_targets_single(self,
                             gt_keypoints,
@@ -742,6 +776,11 @@ class CenterPoseHead(CornerHead):
                                               feat_boxes_wh,
                                               feat_shape=feat_shape,
                                               size_strides=size_strides)
+        if self.with_limbs:
+            limb_target = self._get_limb_target(gt_keypoints,
+                                                feat_shape=feat_shape,
+                                                size_strides=size_strides)
+            return joint_target + limb_target
         return joint_target
 
     def _get_joint_target(self,
@@ -785,3 +824,27 @@ class CenterPoseHead(CornerHead):
                                                                   joint_xy_int,
                                                                   radius=int(kp_radius))
         return hm_target, offset_target, ct2kps_target, offset_ind_target, offset_target_mask, ct2kps_target_mask
+
+    def _get_limb_target(self,
+                         gt_keypoints,
+                         feat_shape,
+                         size_strides):
+        num_objs = gt_keypoints.size(0)
+        feat_gt_keypoints = gt_keypoints.clone()  # > (#obj, #joints(x,y,v))
+        feat_gt_keypoints[..., :2] /= size_strides
+        limb_target = feat_gt_keypoints.new_zeros(self.max_objs, len(self.limbs))  # > (#max_obj, #limb)
+        limb_target_mask = feat_gt_keypoints.new_zeros(self.max_objs, len(self.limbs), dtype=torch.uint8)  # > (#max_obj,)
+        feat_gt_limbs = feat_gt_keypoints[:, self.limbs, :2]  # (B, #limbs, (fr, to), (x, y))
+        feat_gt_limbs_length = (feat_gt_limbs[:, :, 1] - feat_gt_limbs[:, :, 0]).pow(2).sum(dim=-1).sqrt()  # (#obj, #limbs)
+        keep = (feat_gt_limbs[:, :, 0] > 0).all(dim=-1) & (feat_gt_limbs[:, :, 1] > 0).all(dim=-1)  # (#obj, #limbs)
+        feat_gt_limbs_length[~keep] = 0  # (#obj, #limbs)
+        limb_target[:num_objs] = feat_gt_limbs_length
+        limb_target_mask[:num_objs] = keep.to(torch.int32)
+        # TOADD: limb_target_inds
+        # TOCHECK: 透過pred_kps_hm計算長度，再算loss
+        # TOCHECK: 透過pred_ct2kps計算長度，再算loss
+        # TOCHECK: 透過pred_kps_hm計算線中心點，再算loss
+        # TOCHECK: 透過pred_ct2kps計算線中心點，再算loss
+        # obj_joint_ind = obj_id * num_joints + joint_id
+        # ct2kps_target[obj_id, start_ind:end_ind] = joint_xy - feat_gt_centers_int[obj_id]
+        return limb_target, limb_target_mask

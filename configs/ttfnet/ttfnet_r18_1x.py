@@ -23,17 +23,14 @@ model = dict(
         reverse_levels=True,
         with_last_norm=False,
         with_last_relu=False,
-        upsample_cfg=dict(
-            type='bilinear'
-        ),
-        shortcut_convs=(1, 2, 3)
-    ),
+        upsample_cfg=dict(type='bilinear'),
+        shortcut_convs=(1, 2, 3)),
     bbox_head=dict(
         type='TTFHead',
+        num_classes=80,
         in_channels=64,
         feat_channels=(128, 64),
         stacked_convs=(2, 1),
-        num_classes=80,
         offset_base=16,
         area_cfg=dict(
             type='log',

@@ -27,13 +27,12 @@ model = dict(
         with_last_norm=True,
         with_last_relu=True,
         upsample_cfg=dict(
-            type='deconv',
-            kernel_size=4,
-            stride=2,
-            padding=1,
-            output_padding=0,
-            bias=False)
-    ),
+            type='carafe',
+            up_kernel=5,
+            up_group=1,
+            encoder_kernel=3,
+            encoder_dilation=1,
+            compressed_channels=64)),
     bbox_head=dict(
         type='CenterHead',
         num_classes=1,
@@ -55,7 +54,6 @@ model = dict(
             type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1),
         loss_offset=dict(type='L1Loss', loss_weight=1.0),
         loss_joint=dict(type='L1Loss', loss_weight=1.0)))
-cudnn_benchmark = True
 # training and testing settings
 train_cfg = dict(
     vis_every_n_iters=100,
@@ -117,7 +115,7 @@ test_pipeline = [
         ])
 ]
 
-classes = ('person', )
+classes = ('person',)
 data = dict(
     samples_per_gpu=32,
     workers_per_gpu=2,
@@ -146,11 +144,12 @@ optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 lr_config = dict(
     policy='step',
     warmup='linear',
-    warmup_iters=500,
+    warmup_iters=1000,
     warmup_ratio=1.0 / 5,
     step=[270, 300])
 checkpoint_config = dict(interval=10)
 evaluation = dict(interval=1, metric=['bbox', 'keypoints'], multitask=True)
 # runtime settings
 total_epochs = 320
-find_unused_parameters=True
+cudnn_benchmark = True
+find_unused_parameters = True

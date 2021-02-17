@@ -261,10 +261,12 @@ class Resize(object):
         img_shape = results['img_shape']
         for key in results.get('keypoint_fields', []):
             keypoints = results[key][..., :2] * results['scale_factor'][:2]
+            keypoints[results[key][..., 2] == 0] = -1
             keep = (keypoints[..., 0] >= 0) * (keypoints[..., 0] < img_shape[1]) * \
                    (keypoints[..., 1] >= 0) * (keypoints[..., 1] < img_shape[0])
             results[key][..., :2] = keypoints
             results[key][..., 2] = keep.astype(np.int)
+            results[key][~keep.astype(np.bool), :2] = 0
 
     def __call__(self, results):
         """Call function to resize images, bounding boxes, masks, semantic
@@ -422,6 +424,9 @@ class RandomFlip(object):
         for pair in flip_pairs:
             keypoints[..., pair[0], :], keypoints[..., pair[1], :] = \
                 keypoints[..., pair[1], :], keypoints[..., pair[0], :].copy()
+
+        not_keep = keypoints[..., 2] == 0
+        keypoints[not_keep] = 0
 
         return keypoints
 
@@ -1581,6 +1586,7 @@ class RandomCenterCropPad(object):
                 left_w, top_h = center_x - x0, center_y - y0
                 cropped_center_x, cropped_center_y = new_w // 2, new_h // 2
                 # crop bboxes accordingly and clip to the image boundary
+                with_keypoints = results['gt_keypoints'] if 'gt_keypoints' in results else None
                 for key in results.get('bbox_fields', []):
                     if self.with_mask2bbox and 'ignore' not in key:
                         if 'gt_masks' in results:
@@ -1590,7 +1596,7 @@ class RandomCenterCropPad(object):
                             for m in results['gt_masks'].masks:
                                 bboxes.append(mask2polybox(m)[1])
                             bboxes = np.array(bboxes, dtype=np.float32)
-                            mask = self._filter_boxes(patch, bboxes, keypoints=results['gt_keypoints'])
+                            mask = self._filter_boxes(patch, bboxes, keypoints=with_keypoints)
                             bboxes = bboxes[mask]
                         else:
                             raise ValueError("'gt_masks' key not found.")
@@ -1625,7 +1631,7 @@ class RandomCenterCropPad(object):
                                    (keypoints[..., 1] >= 0) * (keypoints[..., 1] < new_h) * keep
                             keypoints[..., 2] = keep.astype(np.int)
                             not_keep = ~keypoints[..., 2].astype(np.bool)
-                            keypoints[not_keep, :2] = -1
+                            keypoints[not_keep, :2] = 0
                             results['gt_keypoints'] = keypoints
                             # > filter out bboxes without any keypoints
                             mask = self._filter_boxes(patch, bboxes, keypoints, kp_in_box=True)

@@ -5,23 +5,32 @@ _base_ = [
 # model settings
 model = dict(
     type='TTFNet',
-    pretrained='./pretrain/darknet53.pth',
+    pretrained='torchvision://resnet18',
     backbone=dict(
-        type='DarknetV3',
-        layers=[1, 2, 8, 8, 4],
-        inplanes=[3, 32, 64, 128, 256, 512],
-        planes=[32, 64, 128, 256, 512, 1024],
-        norm_cfg=dict(type='BN'),
-        out_indices=(1, 2, 3, 4),
+        type='ResNet',
+        depth=18,
+        num_stages=4,
+        out_indices=(0, 1, 2, 3),
         frozen_stages=1,
-        norm_eval=False),
-    neck=None,
+        norm_cfg=dict(type='BN', requires_grad=True),
+        norm_eval=True,
+        style='pytorch'),
+    neck=dict(
+        type='CenterFPN',
+        in_channels=(512, 256, 128, 64),
+        out_channels=64,
+        level_index=0,
+        reverse_levels=True,
+        with_last_norm=False,
+        with_last_relu=False,
+        upsample_cfg=dict(type='bilinear'),
+        shortcut_convs=(1, 2, 3)),
     bbox_head=dict(
         type='TTFHead',
-        num_classes=80,
-        in_channels=128,
+        num_classes=1,
+        in_channels=64,
         feat_channels=(128, 64),
-        stacked_convs=(2, 2),
+        stacked_convs=(2, 1),
         offset_base=16,
         area_cfg=dict(
             type='log',
@@ -33,7 +42,6 @@ model = dict(
         loss_heatmap=dict(
             type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1),
         loss_bbox=dict(type='CenterGIoULoss', loss_weight=5.0)))
-cudnn_benchmark = True
 # training and testing settings
 train_cfg = dict(
     vis_every_n_iters=100,
@@ -42,8 +50,6 @@ test_cfg = dict(
     score_thr=0.01,
     max_per_img=100)
 # dataset settings
-dataset_type = 'CocoDataset'
-data_root = 'data/coco/'
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 train_pipeline = [
@@ -71,14 +77,15 @@ test_pipeline = [
             dict(type='Collect', keys=['img']),
         ])
 ]
+classes = ('person', )
 data = dict(
-    samples_per_gpu=12,
+    samples_per_gpu=32,
     workers_per_gpu=2,
-    train=dict(pipeline=train_pipeline),
-    val=dict(pipeline=test_pipeline),
-    test=dict(pipeline=test_pipeline))
+    train=dict(classes=classes, pipeline=train_pipeline),
+    val=dict(classes=classes, pipeline=test_pipeline),
+    test=dict(classes=classes, pipeline=test_pipeline))
 # optimizer
-optimizer = dict(type='SGD', lr=0.015, momentum=0.9, weight_decay=0.0004,
+optimizer = dict(type='SGD', lr=0.016, momentum=0.9, weight_decay=0.0004,
                  paramwise_cfg=dict(bias_lr_mult=2., bias_decay_mult=0.))
 optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 # learning policy
@@ -89,5 +96,7 @@ lr_config = dict(
     warmup_ratio=1.0 / 5,
     step=[9, 11])
 checkpoint_config = dict(interval=1)
+# yapf:enable
+cudnn_benchmark = True
 # runtime settings
 total_epochs = 12
