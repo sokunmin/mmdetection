@@ -144,14 +144,14 @@ class SingleStageMultiDetector(BaseDetector):
         all_metas = dict(bbox=None, mask=None, keypoint=None)
         all_preds, all_losses = {}, {}
         if self.with_bbox:
-            x, all_preds = self.bbox_head.preprocess(x, all_preds, return_loss=True)
+            x, all_preds = self.bbox_head.preprocess(x, all_preds, training=True)
             all_preds['bbox'] = self.bbox_head(x)
             bbox_gts = self.bbox_head.interprocess(
-                all_preds, gt_inputs, all_metas, return_loss=True)
+                all_preds, gt_inputs, all_metas, training=True)
             all_targets['bbox'], all_metas['bbox'] = self.bbox_head.get_targets(
                 *bbox_gts, feat_shapes=feat_shapes, img_metas=img_metas)
             loss_inputs = self.bbox_head.postprocess(
-                all_preds['bbox'], all_targets, all_metas, return_loss=True)
+                all_preds['bbox'], all_targets, all_metas, training=True)
             bbox_losses = self.bbox_head.loss(
                 *loss_inputs,
                 img_metas=img_metas,
@@ -160,14 +160,14 @@ class SingleStageMultiDetector(BaseDetector):
                 gt_keypoints_ignore=gt_keypoints_ignore)
             all_losses.update(bbox_losses)
         if self.with_mask:
-            x, all_preds = self.mask_head.preprocess(x, all_preds, return_loss=True)
+            x, all_preds = self.mask_head.preprocess(x, all_preds, training=True)
             all_preds['mask'] = self.mask_head(x)
             mask_gts = self.mask_head.interprocess(
-                all_preds, gt_inputs, all_metas, return_loss=True)
+                all_preds, gt_inputs, all_metas, training=True)
             all_targets['mask'], all_metas['mask'] = self.mask_head.get_targets(
                 *mask_gts, feat_shapes=feat_shapes, img_metas=img_metas)
             loss_inputs = self.mask_head.postprocess(
-                all_preds['mask'], all_targets, all_metas, return_loss=True)
+                all_preds['mask'], all_targets, all_metas, training=True)
             mask_losses = self.mask_head.loss(
                 *loss_inputs,
                 img_metas=img_metas,
@@ -176,14 +176,14 @@ class SingleStageMultiDetector(BaseDetector):
                 gt_keypoints_ignore=gt_keypoints_ignore)
             all_losses.update(mask_losses)
         if self.with_keypoint:
-            x, all_preds = self.keypoint_head.preprocess(x, all_preds, return_loss=True)
+            x, all_preds = self.keypoint_head.preprocess(x, all_preds, training=True)
             all_preds['keypoint'] = self.keypoint_head(x)
             keypoint_gts = self.keypoint_head.interprocess(
-                all_preds, gt_inputs, all_metas, return_loss=True)
+                all_preds, gt_inputs, all_metas, training=True)
             all_targets['keypoint'], all_metas['keypoint'] = self.keypoint_head.get_targets(
                 *keypoint_gts, feat_shapes=feat_shapes, img_metas=img_metas)
             loss_inputs = self.keypoint_head.postprocess(
-                all_preds['keypoint'], all_targets, all_metas, return_loss=True)
+                all_preds['keypoint'], all_targets, all_metas, training=True)
             keypoint_losses = self.keypoint_head.loss(
                 *loss_inputs,
                 img_metas=img_metas,

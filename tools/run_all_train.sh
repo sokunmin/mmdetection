@@ -38,7 +38,7 @@ do
     WORK_DIR="work_dirs/${CONFIG_NAME}"
     RESUME_CKPT=${CFG[3]}
     DETERMINISTIC=${CFG[4]}
-    NO_VALID=${CFG[5]}
+    NO_VALIDATE=${CFG[5]}
     DELETE_OLD=${CFG[6]}
     echo "> SEED = ${SEED}"
     echo "> READ_CONFIG_PY = ${READ_CONFIG_PY}"
@@ -47,7 +47,7 @@ do
     echo "> CONFIG_NAME = ${CONFIG_NAME}"
     echo "> CONFIG_PY = ${CONFIG_PY}"
     echo "> DETERMINISTIC = ${DETERMINISTIC}"
-    echo "> NO_VALID = ${NO_VALID}"
+    echo "> NO_VALIDATE = ${NO_VALIDATE}"
     echo "> DELETE_OLD = ${DELETE_OLD}"
 
     sleep 10

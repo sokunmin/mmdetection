@@ -32,7 +32,7 @@ model = dict(
             bias=False)),
     bbox_head=dict(
         type='CenterHead',
-        num_classes=80,
+        num_classes=1,
         in_channels=64,
         feat_channels=64,
         num_feat_levels=1,
@@ -50,10 +50,11 @@ test_cfg = dict(
     score_thr=0.01,
     kp_score_thr=0.1,
     max_per_img=100)
-# dataset settings
+# dataset settings, SEE: Normalize RGB https://aishack.in/tutorials/normalized-rgb/
 img_norm_cfg = dict(
-    # > NOTE: eval offical pretrained weights only
-    # mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], to_rgb=True, norm_rgb=True)
+    # NOTE: add `norm_rgb=True` if eval offical pretrained weights
+    # mean=[0.408, 0.447, 0.470], std=[0.289, 0.274, 0.278], to_rgb=False, norm_rgb=True)
+    # mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], to_rgb=False, norm_rgb=True)
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 train_pipeline = [
     dict(type='LoadImageFromFile', to_float32=True),
@@ -85,7 +86,7 @@ test_pipeline = [
         flip=False,
         transforms=[
             dict(type='Resize'),
-            # dict(type='RandomFlip'),
+            dict(type='RandomFlip'),
             dict(type='Pad', size_divisor=32),
             dict(type='Normalize', **img_norm_cfg),
             dict(type='ImageToTensor', keys=['img']),
@@ -96,13 +97,13 @@ test_pipeline = [
                            'scale_factor', 'flip', 'img_norm_cfg')),
         ])
 ]
-
+classes = ('person', )
 data = dict(
     samples_per_gpu=32,
     workers_per_gpu=2,
-    train=dict(pipeline=train_pipeline),
-    val=dict(pipeline=test_pipeline),
-    test=dict(pipeline=test_pipeline))
+    train=dict(classes=classes, pipeline=train_pipeline),
+    val=dict(classes=classes, pipeline=test_pipeline),
+    test=dict(classes=classes, pipeline=test_pipeline))
 # optimizer
 optimizer = dict(type='SGD', lr=0.01, momentum=0.9, weight_decay=0.0004,
                  paramwise_cfg=dict(bias_lr_mult=2., bias_decay_mult=0.))
@@ -118,3 +119,4 @@ checkpoint_config = dict(interval=1)
 # runtime settings
 total_epochs = 140
 cudnn_benchmark = True
+find_unused_parameters = True

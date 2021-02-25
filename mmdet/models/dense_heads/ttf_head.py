@@ -145,8 +145,8 @@ class TTFHead(CenterHead):
         labels = labels.squeeze(-1)  # (K, 1) -> (K,)
         return bboxes, labels
 
-    def interprocess(self, *inputs, return_loss=False):
-        if return_loss:
+    def interprocess(self, *inputs, training=False):
+        if training:
             # `TRAIN`
             """ 
             [IN] bbox_head() -> (
@@ -175,8 +175,8 @@ class TTFHead(CenterHead):
             pred_outs = inputs[0]
             return pred_outs['bbox']
 
-    def postprocess(self, *inputs, return_loss=False):
-        if return_loss:
+    def postprocess(self, *inputs, training=False):
+        if training:
             # `TRAIN`
             """
             [IN] get_targets() -> (
@@ -213,7 +213,7 @@ class TTFHead(CenterHead):
                    dtype,
                    device):
         assert isinstance(featmap_size, tuple)
-        assert isinstance(stride, tuple)
+        assert len(featmap_size) == len(stride)
         h, w = featmap_size
         h_stride, w_stride = stride
         x_range = torch.arange(0, (w - 1) * w_stride + 1, w_stride,
@@ -542,8 +542,8 @@ class TTFPoseHead(CenterPoseHead):
         keypoints = torch.cat([keypoints, bbox_scores], dim=1)  # (K, #kp x 3 + 1)
         return keypoints
 
-    def interprocess(self, *inputs, return_loss=False):
-        if return_loss:
+    def interprocess(self, *inputs, training=False):
+        if training:
             # `TRAIN`
             """
             [IN] keypoint_head() -> (
@@ -590,8 +590,8 @@ class TTFPoseHead(CenterPoseHead):
             bbox_metas = metas['bbox']
             return keypoint_outs, bbox_metas
 
-    def postprocess(self, *inputs, return_loss=False):
-        if return_loss:
+    def postprocess(self, *inputs, training=False):
+        if training:
             # `TRAIN`
             """
             [IN] get_targets() -> (
@@ -632,6 +632,23 @@ class TTFPoseHead(CenterPoseHead):
             """
             new_inputs = inputs
         return new_inputs
+
+    def get_points(self,
+                   featmap_size,
+                   stride,
+                   dtype,
+                   device):
+        assert isinstance(featmap_size, tuple)
+        assert len(featmap_size) == len(stride)
+        h, w = featmap_size
+        h_stride, w_stride = stride
+        x_range = torch.arange(0, (w - 1) * w_stride + 1, w_stride,
+                               dtype=dtype, device=device)
+        y_range = torch.arange(0, (h - 1) * h_stride + 1, h_stride,
+                               dtype=dtype, device=device)
+        y, x = torch.meshgrid(y_range, x_range)
+        points = torch.stack((x, y), dim=0)  # (2, h, w)
+        return points
 
     def loss(self,
              pred_kp_hm,
@@ -730,7 +747,7 @@ class TTFPoseHead(CenterPoseHead):
     def _get_joint_target(self,
                           gt_keypoints,
                           feat_gt_centers_int,  # (#obj, 2)
-                          feat_boxes_wh,  # (#obj, 2)
+                          feat_gt_boxes_wh,  # (#obj, 2)
                           feat_boxes_radius,
                           boxes_area_topk_log,
                           feat_shape,
@@ -750,7 +767,7 @@ class TTFPoseHead(CenterPoseHead):
 
         for obj_id in range(num_objs):
             feat_obj_keypoints = feat_gt_keypoints[obj_id]
-            kp_radius = gaussian_radius(feat_boxes_wh[obj_id],
+            kp_radius = gaussian_radius(feat_gt_boxes_wh[obj_id],
                                         min_overlap=self.train_cfg.min_overlap)
             kp_radius = max(0, int(kp_radius))
             for joint_id in range(num_joints):
