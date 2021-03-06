@@ -118,8 +118,8 @@ def bbox2result(bboxes, labels, num_classes):
 
 
 def keypoint2result(keypoints, num_joints):
-    """
-    keypoints: (K, (x,y,v) * #joints + s)
+    """ Only supported for SingleStageMultiDetector
+    keypoints: (K, (x,y,v) * #joints + score)
     """
     if keypoints.shape[0] == 0:
         return [np.zeros((0, num_joints * 3 + 1), dtype=np.float32)]

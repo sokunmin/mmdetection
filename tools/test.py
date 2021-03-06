@@ -41,7 +41,7 @@ def parse_args():
         nargs='+',
         help='evaluation metrics, which depends on the dataset, e.g., "bbox",'
         ' "segm", "proposal" "keypoints" for COCO, and "mAP", "recall" for PASCAL VOC')
-    parser.add_argument('--multitask', action='store_true', help='multitask')
+    parser.add_argument('--multitask', action='store_true', help='evaluate for multitask')
     parser.add_argument('--show', action='store_true', help='show results')
     parser.add_argument(
         '--show-dir', help='directory where painted images will be saved')

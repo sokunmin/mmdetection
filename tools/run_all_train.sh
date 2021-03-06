@@ -75,6 +75,9 @@ do
 
     sleep 5
     if [[ "${SLACK_TOKEN}" && "${SLACK_ID}" ]] ; then
+        import -window root -delay 1000 screenshot.png
+        sleep 5
+        slack-cli -t ${SLACK_TOKEN} -d ${SLACK_ID} -f screenshot.png
         slack-cli -t ${SLACK_TOKEN} -d ${SLACK_ID} "> DONE <<TRAINING>> with <<${CONFIG_PY}>>"
     fi
     echo ""

@@ -235,7 +235,7 @@ class CocoDataset(CustomDataset):
                     json_results.append(data)
         return json_results
 
-    def _segm2json(self, results, metric_ind=None):
+    def _det_segm2json(self, results, metric_ind=None):
         """Convert instance segmentation results to COCO json style."""
         bbox_json_results = []
         segm_json_results = []
@@ -274,20 +274,48 @@ class CocoDataset(CustomDataset):
                     segm_json_results.append(data)
         return bbox_json_results, segm_json_results
 
-    def _pose2json(self, results, metric_ind=None):
+    def _pose2json(self, results, det_ind, pose_ind=None):
         json_results = []
         for idx in range(len(self)):  # > #imgs
             img_id = self.img_ids[idx]
+            det = results[det_ind]
             result = results[idx]
-            result = result if metric_ind is None else result[metric_ind]
-            for label in range(len(result)):  # > #cls
+            pose = result if pose_ind is None else result[pose_ind]
+            for label in range(len(pose)):  # > #cls
                 keypoints = result[label]
                 for i in range(keypoints.shape[0]):  # > #topk
                     data = dict()
                     data['image_id'] = img_id
                     data['keypoints'] = self.xyvs2xyv(keypoints[i])
-                    data['score'] = float(keypoints[i][-1])
+                    data['score'] = float(keypoints[i][-1])  # TOADD: use `det`
                     data['category_id'] = self.cat_ids[label]
+                    json_results.append(data)
+        return json_results
+
+    def _segm2json(self, results, det_ind, seg_ind=None):
+        """Convert instance segmentation results to COCO json style.
+           (Only supported for multi-task)
+           bbox must be included
+           segms=tuple(bbox,segm,score)
+           """
+        json_results = []
+        for idx in range(len(self)):
+            img_id = self.img_ids[idx]
+            result = results[idx]
+            det = result[det_ind]
+            seg = result if seg_ind is None else result[seg_ind]
+            for label in range(len(seg)):  # > #cls
+                bboxes = det[label]
+                segms = seg[label]
+                for i in range(len(segms)):  # > #topk
+                    data = dict()
+                    data['image_id'] = img_id
+                    data['bbox'] = self.xyxy2xywh(bboxes[i])
+                    data['score'] = float(bboxes[i][4])
+                    data['category_id'] = self.cat_ids[label]
+                    if isinstance(segms[i]['counts'], bytes):
+                        segms[i]['counts'] = segms[i]['counts'].decode()
+                    data['segmentation'] = segms[i]
                     json_results.append(data)
         return json_results
 
@@ -317,7 +345,7 @@ class CocoDataset(CustomDataset):
             result_files['proposal'] = f'{outfile_prefix}.bbox.json'
             mmcv.dump(json_results, result_files['bbox'])
         elif isinstance(results[0], tuple):
-            json_results = self._segm2json(results)
+            json_results = self._det_segm2json(results)
             result_files['bbox'] = f'{outfile_prefix}.bbox.json'
             result_files['proposal'] = f'{outfile_prefix}.bbox.json'
             result_files['segm'] = f'{outfile_prefix}.segm.json'
@@ -338,14 +366,16 @@ class CocoDataset(CustomDataset):
             result_files['bbox'] = f'{outfile_prefix}.bbox.json'
             result_files['proposal'] = f'{outfile_prefix}.bbox.json'
             mmcv.dump(json_results, result_files['bbox'])
-        if 'segm' in metrics:
-            json_results = self._segm2json(results, metrics.index('segm'))
-            result_files['segm'] = f'{outfile_prefix}.segm.json'
-            mmcv.dump(json_results, result_files['segm'])
-        if 'keypoints' in metrics:
-            json_results = self._pose2json(results, metrics.index('keypoints'))
-            result_files['keypoints'] = f'{outfile_prefix}.keypoints.json'
-            mmcv.dump(json_results, result_files['keypoints'])
+            if 'segm' in metrics:
+                json_results = self._segm2json(
+                    results, metrics.index('bbox'), metrics.index('segm'))
+                result_files['segm'] = f'{outfile_prefix}.segm.json'
+                mmcv.dump(json_results, result_files['segm'])
+            if 'keypoints' in metrics:  # TOCHECK: pass bbox
+                json_results = self._pose2json(
+                    results, metrics.index('bbox'), metrics.index('keypoints'))
+                result_files['keypoints'] = f'{outfile_prefix}.keypoints.json'
+                mmcv.dump(json_results, result_files['keypoints'])
         if not all(k in ['bbox', 'proposal', 'segm', 'keypoints'] for k in metrics):
             raise TypeError('invalid type of results')
         return result_files

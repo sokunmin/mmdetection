@@ -126,7 +126,7 @@ class TTFHead(CenterHead):
                           scores,
                           labels,
                           img_meta,
-                          feat_size,
+                          feat_shape,
                           rescale=False,
                           with_nms=True):
         scores_keep = (scores > self.test_cfg.score_thr).squeeze(-1)  # (K, 1) -> (K,)
@@ -528,7 +528,7 @@ class TTFPoseHead(CenterPoseHead):
                              scores,
                              bbox_scores,
                              img_meta,
-                             feat_size,
+                             feat_shape,
                              rescale=False,
                              with_nms=True):
         num_topk = self.test_cfg.max_per_img

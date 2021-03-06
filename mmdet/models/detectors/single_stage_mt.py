@@ -216,7 +216,7 @@ class SingleStageMultiDetector(BaseDetector):
         x = self.extract_feat(img)
         all_preds = {}
         all_metas = dict(bbox=None, mask=None, keypoint=None)
-        all_results = dict(bbox=[], mask=[], keypoint=[])
+        all_results = dict(bbox=[[]], mask=[[]], keypoint=[[]])
         if self.with_bbox:
             x, all_preds = self.bbox_head.preprocess(x, all_preds)
             all_preds['bbox'] = self.bbox_head(x)
@@ -227,24 +227,21 @@ class SingleStageMultiDetector(BaseDetector):
                 all_preds, all_metas, bbox_dets)
             # skip post-processing when exporting to ONNX
             if not torch.onnx.is_in_onnx_export():
-                bbox_results = [
+                all_results['bbox'] = [
                     # convert detection results to a list of numpy arrays.
                     bbox2result(det_bboxes, det_labels, self.bbox_head.num_classes)
                     for det_bboxes, det_labels in bbox_dets
                 ]
-                all_results['bbox'] = bbox_results
         if self.with_mask:
             x, all_preds = self.mask_head.preprocess(x, all_preds)
             all_preds['mask'] = self.mask_head(x)
             mask_outs = self.mask_head.interprocess(all_preds, all_metas)
-            mask_dets, all_metas['mask'] = self.mask_head.get_masks(
+            mask_dets, all_metas['mask'] = self.mask_head.get_segm_masks(
                 *mask_outs, img_metas=img_metas, rescale=rescale, with_nms=True)
             all_preds, all_metas, mask_dets = self.mask_head.postprocess(
                 all_preds, all_metas, mask_dets)
             if not torch.onnx.is_in_onnx_export():
-                # TOCHECK: add `mask2result`
-                all_results['mask'] = self.mask_head.get_seg_masks(
-                    *mask_dets, img_metas=img_metas, rescale=rescale)
+                all_results['mask'] = mask_dets
         if self.with_keypoint:
             x, all_preds = self.keypoint_head.preprocess(x, all_preds)
             all_preds['keypoint'] = self.keypoint_head(x)
@@ -254,15 +251,14 @@ class SingleStageMultiDetector(BaseDetector):
             all_preds, all_metas, keypoint_dets = self.keypoint_head.postprocess(
                 all_preds, all_metas, keypoint_dets)
             if not torch.onnx.is_in_onnx_export():
-                keypoint_results = [
+                all_results['keypoint'] = [
                     keypoint2result(keypoints, self.keypoint_head.num_classes)
                     for keypoints in keypoint_dets
                 ]
-                all_results['keypoint'] = keypoint_results
         # > remove empty key/values
         result_lists = {k: v for k, v in all_results.items() if v}
         # > unpack values -> zip -> map tuple to list -> list
-        if len(result_lists.keys()) == 1:
+        if len(result_lists.keys()) == 1:  # > #tasks
             return list(result_lists.values())[0]
         return tuple(map(tuple, zip(*result_lists.values())))
 
@@ -307,6 +303,7 @@ class SingleStageMultiDetector(BaseDetector):
         img = mmcv.imread(img)
         img = img.copy()
         if isinstance(result, tuple) and len(result) > 1:  # > multi-task
+            # TOMOD: check len(result) == 3, only for showing
             if self.with_bbox and self.with_keypoint and not self.with_mask:
                 bbox_result, keypoint_result = result
                 segm_result = None
