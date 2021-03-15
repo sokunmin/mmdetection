@@ -7,8 +7,8 @@ IFS="|"
 ARG_COUNT=6
 CONFIGS=(
 # mode: (train, test), delete_old: true or false
-# " seed | config_dir | config_py              | checkpoint  | deterministic   | no_valididate | delete_old"
-  "      | ttfnet     | ttfnet_r18_10x_pose.py |             | --deterministic |               | true    "
+# " seed | config_dir | config_py              | checkpoint  | deterministic | no_valididate | delete_old "
+  "      | ttfnet     | ttfnet_r18_10x_pose.py |             |      true     |               |    true    "
 )
 NUM_GPUS=2
 PYTHON=${PYTHON:-"python"}
@@ -51,6 +51,18 @@ do
     echo "> DELETE_OLD = ${DELETE_OLD}"
 
     sleep 10
+
+    if [[ "${DETERMINISTIC}" == "true" ]] ; then
+        DETERMINISTIC="--deterministic"
+    else
+        DETERMINISTIC=""
+    fi
+
+    if [[ "${NO_VALIDATE}" == "true" ]] ; then
+        NO_VALIDATE="--no-validate"
+    else
+        NO_VALIDATE=""
+    fi
 
     # > delete old checkpoints
     if [[ "${DELETE_OLD}" == "true" ]] ; then

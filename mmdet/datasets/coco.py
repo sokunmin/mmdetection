@@ -278,16 +278,17 @@ class CocoDataset(CustomDataset):
         json_results = []
         for idx in range(len(self)):  # > #imgs
             img_id = self.img_ids[idx]
-            det = results[det_ind]
             result = results[idx]
+            det = result[det_ind]
             pose = result if pose_ind is None else result[pose_ind]
             for label in range(len(pose)):  # > #cls
-                keypoints = result[label]
+                bboxes = det[label]
+                keypoints = pose[label]
                 for i in range(keypoints.shape[0]):  # > #topk
                     data = dict()
                     data['image_id'] = img_id
                     data['keypoints'] = self.xyvs2xyv(keypoints[i])
-                    data['score'] = float(keypoints[i][-1])  # TOADD: use `det`
+                    data['score'] = float(bboxes[i][4])
                     data['category_id'] = self.cat_ids[label]
                     json_results.append(data)
         return json_results

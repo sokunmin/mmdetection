@@ -291,8 +291,8 @@ class SingleStageMultiDetector(BaseDetector):
                     img,
                     result,
                     score_thr=0.3,
-                    color_type='Paired',  # > 'hls, husl, Paired, Sets2
-                    num_colors=20,
+                    color_type='Set2',  # > 'hls, husl, pastel, Paired, Set2
+                    num_colors=25,
                     thickness=1,
                     font_scale=0.5,
                     win_name='',
@@ -303,21 +303,14 @@ class SingleStageMultiDetector(BaseDetector):
         img = mmcv.imread(img)
         img = img.copy()
         if isinstance(result, tuple) and len(result) > 1:  # > multi-task
-            # TOMOD: check len(result) == 3, only for showing
-            if self.with_bbox and self.with_keypoint and not self.with_mask:
-                bbox_result, keypoint_result = result
-                segm_result = None
-            elif self.with_bbox and self.with_mask and not self.with_keypoint:
-                bbox_result, segm_result = result
-                keypoint_result = None
-            else:
-                bbox_result, keypoint_result, segm_result = result
+            assert len(result) == 3  # > results must include bboxes, masks and keypoints
+            bbox_result, segm_result, keypoint_result = result
         else:
-            bbox_result, keypoint_result, segm_result = result, None, None
+            bbox_result, segm_result, keypoint_result = result, None, None
         bboxes = np.vstack(bbox_result)
         bbox_keep = bboxes[:, -1] > score_thr
         num_objs = bbox_keep.sum()
-        colors = (np.array(sns.color_palette(color_type, num_colors)) * 255).astype(np.uint16).tolist()  # 12 *
+        colors = (np.array(sns.color_palette(color_type, num_colors)) * 255).astype(np.uint16).tolist()
         num_colors = len(colors)
         if num_objs == 0:
             return img
@@ -326,22 +319,28 @@ class SingleStageMultiDetector(BaseDetector):
             for i, bbox in enumerate(bbox_result)
         ]
         labels = np.concatenate(labels)
+        num_labels = max(labels) + 1
         # draw segmentation masks
-        if segm_result is not None and len(labels) > 0:  # non empty
+        if segm_result and len(labels) > 0:  # non empty
             segms = mmcv.concat_list(segm_result)
             inds = np.where(bboxes[:, -1] > score_thr)[0]
-            np.random.seed(42)
-            color_masks = [
-                np.random.randint(0, 256, (1, 3), dtype=np.uint8)
-                for _ in range(max(labels) + 1)
-            ]
+            if num_labels > 1:
+                np.random.seed(42)
+                color_masks = [
+                    np.random.randint(0, 256, (1, 3), dtype=np.uint8)
+                    for _ in range(max(labels) + 1)
+                ]
+
             for i in inds:
                 i = int(i)
-                color_mask = color_masks[labels[i]]
+                if num_labels > 1:
+                    color_mask = color_masks[labels[i]]
+                else:
+                    color_mask = np.array([colors[i]])
                 mask = segms[i].astype(bool)
                 img[mask] = img[mask] * 0.5 + color_mask * 0.5
 
-        if keypoint_result is not None:
+        if keypoint_result:
             num_joints = self.keypoint_head.num_classes
             keypoints = np.vstack(keypoint_result)  # (B, K, ((xyv) * #kp + bbox_score)
             kp_shape = keypoints.shape
