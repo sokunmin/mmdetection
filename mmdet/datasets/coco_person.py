@@ -228,7 +228,7 @@ class CocoPersonDataset(CocoDataset):
             obj2_masks = maskUtils.decode(self._poly2mask(obj2_masks, img_info['height'], img_info['width']))
             new_mask = np.maximum(obj1_masks, obj2_masks)
             new_keypoints = obj2_keypoints
-            new_bbox = mask2polybox(new_mask)[1]
+            new_bbox = mask2polybox(new_mask, box2xywh=False)[1]
             new_mask = maskUtils.encode(new_mask)
 
             ann_info[0]['bbox'] = new_bbox
@@ -237,4 +237,56 @@ class CocoPersonDataset(CocoDataset):
             ann_info[0]['num_keypoints'] = (np.array(new_keypoints)[2::3] > 0).sum()
             ann_info[0]['area'] = maskUtils.area(new_mask)
             del ann_info[1]
+        if '000000001732' in img_name:
+            obj_masks = ann_info[0]['segmentation']
+            obj_masks = maskUtils.decode(self._poly2mask(obj_masks, img_info['height'], img_info['width']))  # (h, w)
+            new_polygon, new_bbox = mask2polybox(obj_masks, flatten=False)
+            new_polygon = new_polygon[0]
+            for i, poly in enumerate(new_polygon):
+                if poly[1] > 390:
+                    new_polygon[i, 1] = poly[1] + 70
+                    if new_polygon[i, 1] > 430:
+                        new_polygon[i, 0] = poly[0] - 10
+            new_polygon = [new_polygon.reshape(-1)]
+            new_mask = maskUtils.decode(self._poly2mask(new_polygon, img_info['height'], img_info['width']))
+            new_polygon, new_bbox = mask2polybox(new_mask, box2xywh=False, flatten=True)
+            new_mask = maskUtils.encode(new_mask)
+            ann_info[0]['bbox'] = new_bbox
+            ann_info[0]['segmentation'] = new_mask
+            ann_info[0]['area'] = maskUtils.area(new_mask)
+            # self._showAnns(img_info, ann_info)  # set box2xywh=True for showing
+        if '000000044170' in img_name:
+            obj_masks = ann_info[0]['segmentation']
+            obj_masks = maskUtils.decode(self._poly2mask(obj_masks, img_info['height'], img_info['width']))  # (h, w)
+            new_polygon, new_bbox = mask2polybox(obj_masks, flatten=False)
+            new_polygon = new_polygon[0]
+            for i, poly in enumerate(new_polygon):
+                if poly[0] > 300 and (poly[1] < 200 or poly[1] > 330):
+                    new_polygon[i, 0] = poly[0] - 15
+                if poly[0] < 300 and poly[1] > 150 and poly[1] < 180:
+                    new_polygon[i, 1] = poly[1] + 10
+                if poly[0] < 200 and poly[1] > 180:
+                    new_polygon[i, 0] = poly[0] - 10
+            new_polygon = [new_polygon.reshape(-1)]
+            new_mask = maskUtils.decode(self._poly2mask(new_polygon, img_info['height'], img_info['width']))
+            new_polygon, new_bbox = mask2polybox(new_mask, box2xywh=False, flatten=True)
+            new_mask = maskUtils.encode(new_mask)
+            ann_info[0]['bbox'] = new_bbox
+            ann_info[0]['segmentation'] = new_mask
+            ann_info[0]['area'] = maskUtils.area(new_mask)
+        # if '000000188465' in img_name:
+        #     self._showAnns(img_info, ann_info)
+        #     print()
+        # if '000000257336' in img_name:
+        # if '000000231037' in img_name:
+            # self._showAnns(img_info, ann_info)
+            # print()
         return ann_info
+
+    def _showAnns(self, img_info, ann_info):
+        import matplotlib.pyplot as plt
+        import skimage.io as io
+        img = io.imread(img_info['coco_url'])
+        plt.imshow(img)
+        self.coco.showAnns(ann_info, draw_bbox=True)
+        plt.show()

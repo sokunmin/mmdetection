@@ -1,6 +1,14 @@
-import torch
-
 import numpy as np
+import torch
+import torch.nn.functional as F
+import torchvision
+from mmcv import color_val, imshow, tensor2imgs
+import cv2
+import mmcv
+import os
+# from mmcv.runner import HOOKS, LoggerHook, master_only, TensorboardLoggerHook
+from mmcv.runner import TensorboardLoggerHook, HOOKS, master_only
+
 from mmdet.core import bbox2result, bbox_mapping_back
 from ..builder import DETECTORS
 from .single_stage_mt import SingleStageMultiDetector
@@ -11,6 +19,8 @@ try:
     import matplotlib.collections
     import matplotlib.patches
     import matplotlib.cm as cm
+    import matplotlib.pyplot as plt
+    matplotlib.use('WXAgg')
 except ImportError:
     matplotlib = None
 
@@ -27,9 +37,10 @@ class CenterNet(SingleStageMultiDetector):
                  train_cfg=None,
                  test_cfg=None,
                  pretrained=None,
-                 loss_balance=None):
+                 loss_balance=None,
+                 show_tb_debug=False):
         super(CenterNet, self).__init__(backbone, neck, bbox_head, mask_head, keypoint_head,
-                                        train_cfg, test_cfg, pretrained, loss_balance)
+                                        train_cfg, test_cfg, pretrained, loss_balance, show_tb_debug)
 
     def merge_aug_results(self, aug_results, img_metas):
         """Merge augmented detection bboxes and score.
@@ -101,3 +112,204 @@ class CenterNet(SingleStageMultiDetector):
         bbox_results = bbox2result(bboxes, labels, self.bbox_head.num_classes)
 
         return [bbox_results]
+
+    def train_step(self, data, optimizer):
+        """
+            SEE: https://github.com/open-mmlab/mmdetection/issues/231
+        """
+        if self.show_tb_debug:
+            losses, debug_results = self(**data)
+        else:
+            losses = self(**data)
+        loss, log_vars = self._parse_losses(losses)
+
+        outputs = dict(
+            loss=loss, log_vars=log_vars, num_samples=len(data['img_metas']))
+        if self.show_tb_debug:
+            # `debug_results` is return by `debug_process()`
+            pred_feats, target_feats, filenames = debug_results
+            outputs['pred_imgs'] = pred_feats
+            outputs['target_imgs'] = target_feats
+            outputs['filenames'] = filenames
+        return outputs
+
+    def debug_process(self, imgs, gt_inputs, all_preds, all_targets, all_metas, show_results=False):
+        """
+        This method is called in SingleStageMultiDetector.forward_train()
+        SEE:
+            [1] https://stackoverflow.com/questions/44535068/opencv-python-cover-a-colored-mask-over-a-image
+            [2] https://stackoverflow.com/questions/31877353/overlay-an-image-segmentation-with-numpy-and-matplotlib
+            [3] https://www.tensorflow.org/tensorboard/image_summaries
+        """
+        eps = 1e-12
+        feat_salient_maps, _ = all_preds['mask']
+        feat_salient_maps = torch.clamp(feat_salient_maps, min=eps, max=1 - eps).detach()
+        img_metas = all_metas['img']
+        mean, std, to_rgb, norm_rgb = img_metas[0]['img_norm_cfg'].values()
+        gt_bboxes, gt_masks, gt_keypoints, gt_labels = gt_inputs
+
+        # resize images to feature-scale
+        img_shape = tuple(imgs[0].size()[1:])
+        imgs = tensor2imgs(imgs.detach(), mean, std, to_rgb=False)  # (#img, feat_h, feat_w, 3)
+
+        # resize saliency maps to image-scale
+        img_salient_maps = F.interpolate(feat_salient_maps, img_shape,
+                                         mode='bilinear', align_corners=False).squeeze()
+        img_salient_maps = img_salient_maps.cpu().numpy() * 255  # (#img, img_h, img_w)
+
+        # overlays
+        color_overlays = [(255, 0, 0), (0, 255, 0), (0, 0, 255),
+                          (255, 255, 0), (0, 255, 255), (255, 0, 255)]
+        num_color = len(color_overlays)
+        num_img = len(imgs)
+        filenames, blend_preds, blend_targets = [], [], []
+        for img_id, img, gt_mask, img_saliency, meta in \
+                zip(range(num_img), imgs, gt_masks, img_salient_maps, img_metas):  # > #imgs: 16
+            num_obj = gt_mask.size(0)
+            gt_mask = (gt_mask.cpu().numpy() * 255).astype(np.uint8)
+            filename = os.path.basename(meta['filename'])
+            filenames.append(filename)
+            text = "[#obj=" + str(num_obj) + "] " + filename
+
+            # blend image-scale image and saliency map
+            img_blend = self.overlay_heatmap_to_image(img, img_saliency, dtype=np.uint8)
+            self.put_text(img_blend, text)
+            blend_preds.append(img_blend)
+            if show_results:
+                plt.imshow(img_blend)
+                plt.show()
+
+            blend_target = img
+            if num_obj == 0:
+                overlay_mask = np.zeros((img_shape[1], img_shape[0]), dtype=np.uint8)
+                blend_target = self.overlay_colormask_to_image(blend_target, overlay_mask, color=color_overlays[0])
+            else:
+                for obj_id in range(num_obj):  # > #objs
+                    blend_target = self.overlay_colormask_to_image(
+                        blend_target, gt_mask[obj_id], color=color_overlays[obj_id % num_color])
+            self.put_text(blend_target, text)
+            if show_results:
+                plt.imshow(blend_target)
+                plt.show()
+            blend_targets.append(blend_target)
+        # (B, H, W, 3)
+        blend_preds = np.stack(blend_preds)
+        blend_targets = np.stack(blend_targets)
+        return blend_preds, blend_targets, filenames
+
+    def overlay_heatmap_to_image(self, image, mask, dtype=np.int32, alpha=0.3):
+        if 0.0 <= mask.max() <= 1.0:
+            mask = (mask * 255)
+        if issubclass(image.dtype.type, np.floating):
+            image = image.astype(dtype)
+        if issubclass(mask.dtype.type, np.floating):
+            mask = (mask * 255).astype(np.uint8)
+
+        mask = cv2.normalize(mask, None, alpha=0, beta=255,
+                             norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+        mask = cv2.applyColorMap(mask, cv2.COLORMAP_JET).astype(dtype)
+        blend = cv2.addWeighted(image, 1.0, mask, alpha, 0)
+        return blend
+
+    def overlay_colormask_to_image(self, image, mask, color, alpha=0.45):
+        assert isinstance(color, tuple) and len(color) == 3
+        # create a color overlay mask
+        color_overlay = np.zeros(image.shape, np.uint8)
+        color_overlay[:, :] = color
+        overlay_mask = cv2.bitwise_and(color_overlay, color_overlay, mask=mask)
+        # blend image mask with a overlay mask
+        blend = cv2.addWeighted(image, 1.0, overlay_mask, alpha, 0)
+        return blend
+
+    def put_text(self, image, text, pos=(10, 35), font_size=0.8, thickness=2, color=(255, 87, 255)):
+        cv2.putText(image, text, pos, cv2.FONT_HERSHEY_SIMPLEX,
+                    font_size, color, thickness, cv2.LINE_AA)
+
+    def plot2image(self, filename, img, overlay=None, dtype=np.uint8):
+        """
+        SEE:
+            [1] https://stackoverflow.com/questions/50311861/matplotlib-figure-to-numpy-array-without-white-borders
+            [2] https://stackoverflow.com/questions/7821518/matplotlib-save-plot-to-numpy-array
+            [3] https://stackoverflow.com/questions/20051160/renderer-problems-using-matplotlib-from-within-a-script
+        """
+        fig = plt.figure()
+        ax = fig.gca()
+        ax.imshow(img)
+        if overlay is not None:
+            ax.imshow(overlay, cmap='jet', alpha=0.4)
+        ax.axis('tight')
+
+        plt.subplots_adjust(0, 0, 1, 1, 0, 0)
+        # plt.title(filename)
+        plt.xticks([])
+        plt.yticks([])
+        plt.grid(False)
+        plt.show()
+
+        fig.canvas.draw()
+        plot_img = np.fromstring(fig.canvas.tostring_rgb(), dtype=dtype, sep='')
+        w, h = fig.canvas.get_width_height()
+        plot_img = plot_img.reshape((h, w, 3))
+        plt.close()
+        return plot_img
+
+
+# SEE https://github.com/open-mmlab/mmdetection/issues/231
+@HOOKS.register_module()
+class TensorboardImageHook(TensorboardLoggerHook):
+
+    def __init__(self,
+                 log_dir=None,
+                 interval=10,
+                 ignore_last=True,
+                 reset_flag=True,
+                 by_epoch=True):
+        super(TensorboardImageHook, self).__init__(log_dir, interval, ignore_last,
+                                                   reset_flag, by_epoch)
+
+    @master_only
+    def log(self, runner):
+        tags = self.get_loggable_tags(runner, allow_text=True)
+        for tag, val in tags.items():
+            if isinstance(val, str):
+                self.writer.add_text(tag, val, self.get_step(runner))
+            else:
+                self.writer.add_scalar(tag, val, self.get_step(runner))
+        # > for example: `log_images = runner.outputs.get('log_images')`
+
+        filenames = runner.outputs.get('filenames', None)
+        pred_imgs = runner.outputs.get('pred_imgs', None)
+        target_imgs = runner.outputs.get('target_imgs', None)
+
+        if pred_imgs is not None:
+            self.writer.add_image(
+                'image/preds', pred_imgs, runner.iter, dataformats='NHWC'
+            )
+        if target_imgs is not None:
+            self.writer.add_image(
+                'image/targets', target_imgs, runner.iter, dataformats='NHWC'
+            )
+
+    def show(self, img, img_shape, dpi=80):
+        npimg = img.numpy()
+        plt.imshow(np.transpose(npimg, (1, 2, 0)))
+
+        depth, height, width = img_shape
+
+        # What size does the figure need to be in inches to fit the image?
+        figsize = width / float(dpi), height / float(dpi)
+
+        # Create a figure of the right size with one axes that takes up the full figure
+        fig = plt.figure(figsize=figsize)
+        ax = fig.add_axes([0, 0, 1, 1])
+
+        # Hide spines, ticks, etc.
+        ax.axis('off')
+
+        # Display the image.
+        ax.imshow(npimg, cmap='gray')
+        plt.show()
+
+    @master_only
+    def after_run(self, runner):
+        self.writer.close()

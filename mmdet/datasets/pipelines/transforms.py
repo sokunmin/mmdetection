@@ -8,7 +8,7 @@ from numpy import random
 from mmdet.core import PolygonMasks, BitmapMasks
 from mmdet.core.evaluation.bbox_overlaps import bbox_overlaps
 from ..builder import PIPELINES
-from ...core.bbox.transforms import mask2polybox
+from ...core.bbox.transforms import mask2polybox, masks2bboxes
 from ...utils.vis_debug import show_anno
 
 try:
@@ -1565,11 +1565,10 @@ class RandomCenterCropPad(object):
 
                 cropped_img, border, patch = self._crop_image_and_paste(
                     img, [center_y, center_x], [new_h, new_w])
-
                 # > filter bboxes beyond the patch
-                mask = (boxes[:, 0] >= patch[2]) * (boxes[:, 1] >= patch[3]) * \
-                       (boxes[:, 2] <= patch[0]) * (boxes[:, 3] <= patch[1])
-                boxes = boxes[~mask]
+                not_keep = (boxes[:, 0] >= patch[2]) * (boxes[:, 1] >= patch[3]) * \
+                           (boxes[:, 2] <= patch[0]) * (boxes[:, 3] <= patch[1])
+                boxes = boxes[~not_keep]
 
                 mask = self._filter_boxes(patch, boxes)
                 # if image do not have valid bbox, any crop patch is valid.
@@ -1588,20 +1587,15 @@ class RandomCenterCropPad(object):
                 # crop bboxes accordingly and clip to the image boundary
                 with_keypoints = results['gt_keypoints'] if 'gt_keypoints' in results else None
                 for key in results.get('bbox_fields', []):
+                    mask = self._filter_boxes(patch, results[key])
                     if self.with_mask2bbox and 'ignore' not in key:
                         if 'gt_masks' in results:
-                            masks = results['gt_masks']
-                            results['gt_masks'] = masks.crop_and_paste(patch, border, (new_h, new_w))
-                            bboxes = []
-                            for m in results['gt_masks'].masks:
-                                bboxes.append(mask2polybox(m)[1])
-                            bboxes = np.array(bboxes, dtype=np.float32)
-                            mask = self._filter_boxes(patch, bboxes, keypoints=with_keypoints)
-                            bboxes = bboxes[mask]
+                            gt_masks = results['gt_masks'][~not_keep][mask]
+                            gt_masks = gt_masks.crop_and_paste(patch, border, (new_h, new_w))
+                            bboxes = masks2bboxes(gt_masks.masks, padding=0)
                         else:
                             raise ValueError("'gt_masks' key not found.")
                     else:
-                        mask = self._filter_boxes(patch, results[key])
                         bboxes = results[key][mask]
                         bboxes[:, 0:4:2] += cropped_center_x - left_w - x0
                         bboxes[:, 1:4:2] += cropped_center_y - top_h - y0
@@ -1617,13 +1611,12 @@ class RandomCenterCropPad(object):
                             labels = labels[keep]
                             results['gt_labels'] = labels
                         if 'gt_masks' in results:
-                            masks = results['gt_masks']
                             if self.with_mask2bbox:
-                                results['gt_masks'] = masks[mask][keep]
+                                results['gt_masks'] = gt_masks[keep]
                             else:
-                                results['gt_masks'] = masks.crop_and_paste(patch, border, (new_h, new_w))
+                                results['gt_masks'] = gt_masks.crop_and_paste(patch, border, (new_h, new_w))
                         if 'gt_keypoints' in results:
-                            keypoints = results['gt_keypoints'][mask][keep]  # > (#obj, 17, 3)
+                            keypoints = results['gt_keypoints'][~not_keep][mask][keep]  # > (#obj, 17, 3)
                             keypoints[..., 0] += cropped_center_x - left_w - x0
                             keypoints[..., 1] += cropped_center_y - top_h - y0
                             keep = keypoints[..., 2].astype(np.bool)  # > (#obj, 17)
@@ -1633,10 +1626,11 @@ class RandomCenterCropPad(object):
                             not_keep = ~keypoints[..., 2].astype(np.bool)
                             keypoints[not_keep, :2] = 0
                             results['gt_keypoints'] = keypoints
-                            # > filter out bboxes without any keypoints
+                            # > DEBUG: filter out bboxes without any keypoints
+                            patch = np.array([0, 0, cropped_img.shape[0], cropped_img.shape[1]])
                             mask = self._filter_boxes(patch, bboxes, keypoints, kp_in_box=True)
                             results[key] = results[key][mask]
-                            results['gt_masks'] = results['gt_masks'][mask]
+                            results['gt_masks'] = gt_masks[mask]
                             results['gt_keypoints'] = keypoints[mask]
                 # crop semantic seg
                 for key in results.get('seg_fields', []):

@@ -209,7 +209,7 @@ def bbox_rescale(bboxes, scale_factor=1.0):
     return rescaled_bboxes
 
 
-def mask2polybox(mask, cnt_epsilon=0.003):
+def mask2polybox(mask, cnt_epsilon=0.003, box2xywh=False, flatten=False):
     thres_mask = mask * 255
     ret, thresh = cv2.threshold(thres_mask, 127, 255, cv2.THRESH_BINARY)
     contours, hierarchy = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
@@ -220,18 +220,51 @@ def mask2polybox(mask, cnt_epsilon=0.003):
         mask_poly = np.reshape(mask_poly, (mask_poly.shape[0], -1))
         if np.sum(mask_poly) == 0:
             print('> [mask2bbox()] Error', mask_poly)
+        else:
+            polygons.append(mask_poly)
 
-        polygons.append(mask_poly)
-
-    if len(polygons) == 0:
-        return [], np.ones((4,), np.int) * -1
+    if not polygons:
+        return [], np.ones((4,), np.float32) * -1
 
     # compute bbox
     box_poly = np.concatenate(polygons, axis=0)
     min_x, min_y = box_poly[:, 0].min(), box_poly[:, 1].min()
     max_x, max_y = box_poly[:, 0].max(), box_poly[:, 1].max()
-    # [1] (x, y, w, h)
-    # bbox = np.array([min_x, min_y, max_x - min_x, max_y - min_y])
-    # [2] (x1, y1, x2, y2)
-    bbox = np.array([min_x, min_y, max_x - 1, max_y - 1], dtype=np.float32)
+    if box2xywh:
+        bbox = np.array([min_x, min_y, max_x - min_x, max_y - min_y], dtype=np.float32)
+    else:
+        bbox = np.array([min_x, min_y, max_x, max_y], dtype=np.float32)
+
+    if flatten:
+        flatten_polygons = []
+        for poly in polygons:
+            flatten_polygons.append(poly.reshape(-1))
+        return flatten_polygons, bbox
     return polygons, bbox
+
+
+def masks2bboxes(masks, padding=0):
+    """
+    SEE: https://github.com/multimodallearning/pytorch-mask-rcnn/blob/master/utils.py
+    Args:
+        masks (nparray): (N, H, W)
+    Return:
+        boxes: (N, (x1, y1, x2, y2))
+    """
+    n = masks.shape[0]
+    boxes = np.zeros((n, 4), dtype=np.float32)
+    for i in range(n):
+        m = masks[i]  # > (H, W)
+        rows = np.where(np.any(m, axis=0))[0]
+        cols = np.where(np.any(m, axis=1))[0]
+        if rows.shape[0]:
+            x1, x2 = rows[[0, -1]]
+            y1, y2 = cols[[0, -1]]
+            # x2 and y2 should not be part of the box. Increment by 1.
+            boxes[i, 0] = x1
+            boxes[i, 1] = y1
+            boxes[i, 2] = x2 + padding
+            boxes[i, 3] = y2 + padding
+        else:
+            boxes[i] = np.zeros(4, dtype=np.float32)
+    return boxes

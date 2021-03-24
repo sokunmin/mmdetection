@@ -53,7 +53,8 @@ model = dict(
         saliency_channels=1,
         shape_channels=576,  # 576: 24x24, 1024: 32x32
         loss_mask=dict(
-            type='CrossEntropyLoss', use_sigmoid=True, loss_weight=1.0)))
+            type='CrossEntropyLoss', use_sigmoid=True, loss_weight=1.0)),
+    show_tb_debug=True)
 # training and testing settings
 train_cfg = dict(
     vis_every_n_iters=100,
@@ -148,3 +149,10 @@ evaluation = dict(interval=1, metric=['bbox', 'segm'], multitask=True)
 total_epochs = 130
 cudnn_benchmark = True
 find_unused_parameters = True
+
+log_config = dict(
+    interval=10,
+    hooks=[
+        dict(type='TextLoggerHook'),
+        dict(type='TensorboardImageHook'),
+    ])

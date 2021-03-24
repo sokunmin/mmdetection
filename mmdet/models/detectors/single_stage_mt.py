@@ -1,15 +1,16 @@
-import torch
-import torch.nn as nn
-import numpy as np
 import cv2
 import mmcv
+import numpy as np
 import seaborn as sns
-from mmcv import color_val, imshow
+import torch
+import torch.nn as nn
+from mmcv import imshow
+
 from mmcv.image import imread, imwrite
 from mmdet.core import bbox2result
-from ..builder import DETECTORS, build_backbone, build_head, build_neck
-from .base import BaseDetector
 from mmdet.models import build_loss
+from .base import BaseDetector
+from ..builder import DETECTORS, build_backbone, build_head, build_neck
 from ...core.bbox.transforms import keypoint2result
 
 
@@ -30,7 +31,8 @@ class SingleStageMultiDetector(BaseDetector):
                  train_cfg=None,
                  test_cfg=None,
                  pretrained=None,
-                 loss_balance=None):
+                 loss_balance=None,
+                 show_tb_debug=False):
         super(SingleStageMultiDetector, self).__init__()
         self.backbone = build_backbone(backbone)
         if neck is not None:
@@ -52,6 +54,7 @@ class SingleStageMultiDetector(BaseDetector):
         self.with_balance_loss = loss_balance is not None
         if self.with_balance_loss:
             self.loss_balance = build_loss(loss_balance)
+        self.show_tb_debug = show_tb_debug
         self.init_weights(pretrained=pretrained)
 
     def init_weights(self, pretrained=None):
@@ -141,7 +144,7 @@ class SingleStageMultiDetector(BaseDetector):
             ]
         gt_inputs = (gt_bboxes, gt_masks, gt_keypoints, gt_labels)
         all_targets = dict(bbox=None, mask=None, keypoint=None)
-        all_metas = dict(bbox=None, mask=None, keypoint=None)
+        all_metas = dict(img=img_metas, bbox=None, mask=None, keypoint=None)
         all_preds, all_losses = {}, {}
         if self.with_bbox:
             x, all_preds = self.bbox_head.preprocess(x, all_preds, training=True)
@@ -194,10 +197,16 @@ class SingleStageMultiDetector(BaseDetector):
         if self.with_balance_loss:
             all_losses = self.group_losses(all_losses)
             all_losses = self.loss_balance(*all_losses)
+        if self.show_tb_debug:
+            debug_results = self.debug_process(img, gt_inputs, all_preds, all_targets, all_metas)
+            return all_losses, debug_results
         return all_losses
 
     def group_losses(self, losses):
         return losses
+
+    def debug_process(self, imgs, gt_inputs, all_preds, all_targets, all_metas, show_results=False):
+        pass
 
     def simple_test(self, img, img_metas, rescale=False):
         """Test function without test time augmentation.
