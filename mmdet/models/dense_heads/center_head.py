@@ -835,6 +835,7 @@ class CenterMaskHead(CornerHead):
         self.feat_channels = feat_channels
         self.saliency_channels = saliency_channels
         self.shape_channels = shape_channels
+        self.shape_dim = int(math.sqrt(shape_channels))
         self.max_objs = max_objs
         self.resize_method = resize_method
         self.rescale_ratio = rescale_ratio
@@ -891,13 +892,12 @@ class CenterMaskHead(CornerHead):
         pred_ct_saliency, pred_ct_shape = mask_outs
         clses, scores, bboxes, ct_inds, ct_xs, ct_ys, ct_wh = bbox_metas
         batch, shape_dim, feat_h, feat_w = pred_ct_shape.size()
-        shape_size = int(math.sqrt(shape_dim))
         num_topk = self.test_cfg.max_per_img
         ct_saliency = pred_ct_saliency.detach()  # (B, 1, H, W)
         ct_shape = pred_ct_shape.detach()  # (B, SxS, H, W)
 
         ct_shape = self._transpose_and_gather_feat(ct_shape, ct_inds)  # (B, SxS, H, W) -> (B, K, SxS)
-        ct_shape = ct_shape.view(batch, num_topk, shape_size, shape_size)  # (B, K, S, S)
+        ct_shape = ct_shape.view(batch, num_topk, self.shape_dim, self.shape_dim)  # (B, K, S, S)
         result_list = []
         for img_id in range(len(img_metas)):  # > #img
             result_list.append(self.get_segm_masks_single(
@@ -914,7 +914,7 @@ class CenterMaskHead(CornerHead):
         return result_list, None
 
     def get_segm_masks_single(self,
-                              pred_saliency,  # (B, H, W)
+                              pred_saliency,  # (1, H, W)
                               pred_shape,  # (K, S, S)
                               pred_bboxes,  # (K, 4)
                               pred_labels,
@@ -923,11 +923,13 @@ class CenterMaskHead(CornerHead):
                               feat_shape,
                               rescale=False,
                               with_nms=True):
-        # pred_bboxes = pred_bboxes.to(torch.long)
-        # pred_bboxes[:, [2, 3]] += 1
+        # > [old]
+        # pred_bboxes[:, [0, 1]] = pred_bboxes[:, [0, 1]].floor()
+        # pred_bboxes[:, [2, 3]] = pred_bboxes[:, [2, 3]].ceil()
         # pred_bboxes[:, [0, 2]] = torch.clamp(pred_bboxes[:, [0, 2]], min=0, max=feat_shape[1])
         # pred_bboxes[:, [1, 3]] = torch.clamp(pred_bboxes[:, [1, 3]], min=0, max=feat_shape[0])
-        # pred_masks = self._assemble_masks(pred_saliency, pred_shape, pred_bboxes)
+        # pred_masks = self._assemble_masks(pred_saliency.squeeze(0), pred_shape, pred_bboxes, training=False)
+        # > [new]
         pred_masks = self._new_assemble_masks(pred_saliency, pred_shape, pred_bboxes)
 
         ori_shape = img_meta['ori_shape']
@@ -1014,8 +1016,7 @@ class CenterMaskHead(CornerHead):
                     mask=(ct_saliency, ct_shape)
                 targets:
                     bbox=(hm_target, offset_target, wh_target, ct_target_mask, ct_ind_target)
-                    mask=(boxes_target, mask_target, saliency_target, shape_target, shape_target_mask, \
-                          feat_shape_target, feat_shape_target_mask)
+                    mask=(boxes_target, mask_target)
                 metas:
                     bbox=(feat_gt_centers_int, feat_gt_boxes_wh, feat_gt_boxes)
                     mask=None
@@ -1050,12 +1051,13 @@ class CenterMaskHead(CornerHead):
             new_inputs = inputs
         return new_inputs
 
-    def _crop_masks(self, masks, boxes, padding=0.0):
+    def _crop_masks(self, masks, boxes, pad_ratio=0.0, padding=1):
         """
         Args:
             masks(Tensor): (N, H, W)
             boxes(Tensor): bbox coords (N, 4)
-            padding(float): crop by a ratio of a box
+            pad_ratio(float): crop by a ratio of a box
+            padding(int): padding on width and height boundary
         Return:
             Tensor: the cropped masks
         """
@@ -1067,10 +1069,10 @@ class CenterMaskHead(CornerHead):
 
         box_w = boxes[..., 2] - boxes[..., 0]
         box_h = boxes[..., 3] - boxes[..., 1]
-        x1 = torch.clamp(boxes[..., 0] - box_w * padding, min=0).unsqueeze(1)
-        x2 = torch.clamp(boxes[..., 2] + box_w * padding, max=w).unsqueeze(1)
-        y1 = torch.clamp(boxes[..., 1] - box_h * padding, min=0).unsqueeze(1)
-        y2 = torch.clamp(boxes[..., 3] + box_h * padding, max=h).unsqueeze(1)
+        x1 = torch.clamp(boxes[..., 0] - box_w * pad_ratio - padding, min=0).unsqueeze(1)
+        x2 = torch.clamp(boxes[..., 2] + box_w * pad_ratio - padding, max=w).unsqueeze(1)
+        y1 = torch.clamp(boxes[..., 1] - box_h * pad_ratio + padding, min=0).unsqueeze(1)
+        y2 = torch.clamp(boxes[..., 3] + box_h * pad_ratio + padding, max=h).unsqueeze(1)
 
         rows = torch.arange(w, device=x1.device, dtype=x1.dtype).view(1, 1, -1).expand(n, h, w)
         cols = torch.arange(h, device=x1.device, dtype=x1.dtype).view(1, -1, 1).expand(n, h, w)
@@ -1113,76 +1115,68 @@ class CenterMaskHead(CornerHead):
 
     def _new_assemble_masks(self, ct_saliency, ct_shape, crop_boxes, training=False):
         num_obj = crop_boxes.size(0)  # > #obj or topk
-        _, feat_h, feat_w = ct_saliency.size()
-        shape_size = int(math.sqrt(self.shape_channels))
-        crop_masks = self._crop_masks(ct_saliency, crop_boxes)
+        feat_h, feat_w = ct_saliency.size()[1:]
+        if training and num_obj == 0:
+            return ct_saliency.new_zeros((1, feat_h, feat_w), dtype=torch.float32)
+        crop_masks = self._crop_masks(ct_saliency, crop_boxes, padding=0)
         crop_salient_maps = ct_saliency.expand(num_obj, feat_h, feat_w) * crop_masks.float()
-        crop_boxes, _ = self._masks2bboxes(crop_masks)
-        pred_masks = ct_saliency.new_zeros((num_obj, feat_h, feat_w), dtype=torch.float32)
-        for k in range(num_obj):
-            box_x1, box_y1, box_x2, box_y2 = crop_boxes[k].long()
-            box_min_x, box_min_y = min(box_x1, box_x2), min(box_y1, box_y2)
-            box_max_x, box_max_y = max(box_x1, box_x2), max(box_y1, box_y2)
-            box_w, box_h = box_max_x - box_min_x, box_max_y - box_min_y
-            crop_shape = ct_shape[k].view(1, 1, shape_size, shape_size)
-            if self.resize_method == 'gap':  # global average pooling
-                crop_shape = F.adaptive_avg_pool2d(
-                    crop_shape, (box_h, box_w)).squeeze(0)
-            elif self.resize_method == 'gmp':  # global max pooling
-                crop_shape = F.adaptive_max_pool2d(
-                    crop_shape, (box_h, box_w)).squeeze(0)
-            elif self.resize_method == 'bilinear':
-                crop_shape = F.interpolate(
-                    crop_shape, (box_h, box_w),
-                    mode='bilinear', align_corners=False).squeeze(0)
-            else:
-                raise NotImplementedError
-            crop_salient_map = crop_salient_maps[k]  # (H, W)
-            crop_local_shape = ct_saliency.new_zeros((feat_h, feat_w), dtype=torch.float32)
-            crop_local_shape[box_min_y:box_max_y, box_min_x:box_max_x] = crop_shape.squeeze(0)
-            final_mask = torch.einsum(
-                'ij,ij->ij', [crop_salient_map, crop_local_shape])
-            pred_masks[k] = final_mask
+        crop_boxes = self._masks2bboxes(crop_masks, padding=1)[0].long()
+        pred_masks = [] if training else ct_saliency.new_zeros((num_obj, feat_h, feat_w), dtype=torch.float32)
+        for obj_id in range(num_obj):
+            x1, y1, x2, y2 = crop_boxes[obj_id].tolist()
+            min_x, min_y, max_x, max_y = min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)
+            box_w, box_h = max_x - min_x, max_y - min_y
+            if box_w > 0 and box_h > 0:
+                max_x, max_y = x1 + box_w, y1 + box_h
+                # crop salient map by bbox
+                crop_saliency = crop_salient_maps[obj_id, min_y:max_y, min_x:max_x].view(box_h, box_w)
+                # resize local shape by bbox size
+                crop_shape = self._resize_masks(ct_shape[obj_id].unsqueeze(0), (box_h, box_w),
+                                                method=self.resize_method, squeeze=True)  # (box_h, box_w)
+                # NOTE: perform `Hadamard product` to form final mask, see paper 3.3 Mask Assembly
+                final_mask = torch.einsum('ij,ij->ij', [crop_saliency, crop_shape])
+                if training and self.crop_target:
+                    pred_masks.append(final_mask)
+                else:
+                    pred_masks[obj_id, min_y:max_y, min_x:max_x] = final_mask
         return pred_masks
 
     def _assemble_masks(self, ct_saliency, ct_shape, crop_boxes, training=False):
-        crop_boxes = crop_boxes.to(torch.long)
+        """
+        When `TRAINING` this is called in `loss()`:
+            ct_saliency(Tensor): shape (feat_h, feat_w)
+            ct_shape(Tensor): shape (#max_obj, S, S)
+            crop_boxes(Tensor): shape (#obj, 4)
+        When `TESTING` this is called in `get_segm_masks_single()`:
+            ct_saliency(Tensor): shape (feat_h, feat_w)
+            ct_shape(Tensor): shape (#num_topk, S, S)
+            crop_boxes(Tensor): shape (#num_topk, 4)
+        """
+        assert len(ct_saliency.size()) == 2 and len(ct_shape.size()) >= 3
+        if crop_boxes.dtype != torch.long:
+            crop_boxes = crop_boxes.to(torch.long)
         num_obj = crop_boxes.size(0)  # > #obj or topk
-        _, feat_h, feat_w = ct_saliency.size()
-        shape_size = int(math.sqrt(self.shape_channels))
-        pred_masks = [] if training else ct_saliency.new_zeros((num_obj, feat_h, feat_w), dtype=torch.float32)
+        feat_h, feat_w = ct_saliency.size()
         if training and num_obj == 0:
             return ct_saliency.new_zeros((1, feat_h, feat_w), dtype=torch.float32)
-        for k in range(num_obj):
-            box_x1, box_y1, box_x2, box_y2 = crop_boxes[k]
-            box_x2 = box_x1 + 1 if box_x1 >= box_x2 else box_x2
-            box_y2 = box_y1 + 1 if box_y1 >= box_y2 else box_y2
-            box_min_x, box_min_y = min(box_x1, box_x2), min(box_y1, box_y2)
-            box_max_x, box_max_y = max(box_x1, box_x2), max(box_y1, box_y2)
-            box_w, box_h = box_max_x - box_min_x, box_max_y - box_min_y
-            crop_saliency = ct_saliency[0, box_min_y:box_max_y, box_min_x:box_max_x].view(box_h, box_w)
-            crop_shape = ct_shape[k].view(1, 1, shape_size, shape_size)
-            # TOADD: upsample by 2x
-            if self.resize_method == 'gap':  # global average pooling
-                crop_shape = F.adaptive_avg_pool2d(
-                    crop_shape, (box_h, box_w)).view(box_h, box_w)
-            elif self.resize_method == 'gmp':  # global max pooling
-                crop_shape = F.adaptive_max_pool2d(
-                    crop_shape, (box_h, box_w)).view(box_h, box_w)
-            elif self.resize_method == 'bilinear':
-                crop_shape = F.interpolate(
-                    crop_shape, (box_h, box_w),
-                    mode='bilinear', align_corners=False).view(box_h, box_w)
-            else:
-                raise NotImplementedError
-
-            # NOTE: perform `Hadamard product` to form final mask, see paper 3.3 Mask Assembly
-            final_mask = torch.einsum(
-                'ij,ij->ij', [crop_saliency, crop_shape])
-            if training and self.crop_target:
-                pred_masks.append(final_mask)
-            else:
-                pred_masks[k, box_min_y:box_max_y, box_min_x:box_max_x] = final_mask
+        pred_masks = [] if training else ct_saliency.new_zeros((num_obj, feat_h, feat_w), dtype=torch.float32)
+        for obj_id in range(num_obj):
+            x1, y1, x2, y2 = crop_boxes[obj_id]
+            min_x, min_y, max_x, max_y = min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)
+            box_w, box_h = max_x - min_x, max_y - min_y
+            if box_w > 0 and box_h > 0:
+                max_x, max_y = x1 + box_w, y1 + box_h
+                # crop salient map by bbox
+                crop_saliency = ct_saliency[min_y:max_y, min_x:max_x].view(box_h, box_w)
+                # resize local shape by bbox size
+                crop_shape = self._resize_masks(ct_shape[obj_id].unsqueeze(0), (box_h, box_w),
+                                                method=self.resize_method, squeeze=True)  # (box_h, box_w)
+                # NOTE: perform `Hadamard product` to form final mask, see paper 3.3 Mask Assembly
+                final_mask = torch.einsum('ij,ij->ij', [crop_saliency, crop_shape])
+                if training and self.crop_target:
+                    pred_masks.append(final_mask)
+                else:
+                    pred_masks[obj_id, min_y:max_y, min_x:max_x] = final_mask
         return pred_masks
 
     def loss(self,
@@ -1198,14 +1192,15 @@ class CenterMaskHead(CornerHead):
         eps = 1e-12
         pred_ct_saliency = torch.clamp(pred_ct_saliency, min=eps, max=1 - eps)
         pred_ct_shape = torch.clamp(pred_ct_shape, min=eps, max=1 - eps)
+        batch, max_obj = ct_ind_target.size()
         pred_ct_shape = self._transpose_and_gather_feat(pred_ct_shape, ct_ind_target)  # (B, SxS, H, W) -> (B, K, SxS)
-        num_img, num_topk, shape_dim = pred_ct_shape.size()
-        loss_mask = 0
-        num_objs = 0
+        pred_ct_shape = pred_ct_shape.view(batch, max_obj, self.shape_dim, self.shape_dim)
+        loss_mask, num_objs = 0, 0
         for img_id, ct_saliency, ct_shape, box_target, mask_target in \
-                zip(range(num_img), pred_ct_saliency, pred_ct_shape, boxes_target, masks_target):
+                zip(range(batch), pred_ct_saliency, pred_ct_shape, boxes_target, masks_target):  # > #img
             num_obj = box_target.size(0)
-            pred_masks = self._assemble_masks(ct_saliency, ct_shape, box_target, training=True)  # (#obj, H, W)
+            # > 1 salient map vs N bboxes
+            pred_masks = self._new_assemble_masks(ct_saliency, ct_shape, box_target, training=True)  # (#obj, H, W)
             if num_obj == 0:
                 loss_mask += pred_masks.sum() * 0.
             else:
@@ -1254,19 +1249,7 @@ class CenterMaskHead(CornerHead):
         if num_obj == 0:
             feat_gt_masks = feat_gt_boxes.new_zeros(0, feat_shape[0], feat_shape[1], dtype=torch.float32)
         else:
-            if self.resize_method == 'gap':
-                feat_gt_masks = F.adaptive_avg_pool2d(
-                    gt_masks.unsqueeze(0), feat_shape).squeeze(0)
-            elif self.resize_method == 'gmp':
-                feat_gt_masks = F.adaptive_max_pool2d(
-                    gt_masks.unsqueeze(0), feat_shape).squeeze(0)
-            elif self.resize_method == 'bilinear':
-                feat_gt_masks = F.interpolate(
-                    gt_masks.unsqueeze(0), feat_shape,
-                    mode='bilinear', align_corners=False).squeeze(0)  # > (#obj, feat_h, feat_w)
-            else:
-                raise NotImplementedError
-
+            feat_gt_masks = self._resize_masks(gt_masks, feat_shape, method=self.resize_method)
         # get bboxes from gt masks
         bboxes_target, keep1 = self._masks2bboxes(gt_masks, padding=1)  # (#obj, 4)
         bboxes_target[:, 0::2] = bboxes_target[:, 0::2] / width_stride
@@ -1275,40 +1258,55 @@ class CenterMaskHead(CornerHead):
         bboxes_target[:, [2, 3]] = bboxes_target[:, [2, 3]].ceil()
         bboxes_target[:, [0, 2]] = torch.clamp(bboxes_target[:, [0, 2]], min=0, max=feat_shape[1])
         bboxes_target[:, [1, 3]] = torch.clamp(bboxes_target[:, [1, 3]], min=0, max=feat_shape[0])
+        bboxes_target = bboxes_target.long()
 
         feat_bboxes_target, keep2 = self._masks2bboxes(feat_gt_masks, padding=1)  # (#obj, 4)
         feat_bboxes_target[:, 0::2] = torch.clamp(feat_bboxes_target[:, 0::2], max=feat_shape[1])
         feat_bboxes_target[:, 1::2] = torch.clamp(feat_bboxes_target[:, 1::2], max=feat_shape[0])
+        feat_bboxes_target = feat_bboxes_target.long()
 
-        bbox_keep, feat_bbox_keep = [], []
         masks_target, feat_masks_target = [], []
         for obj_id, bbox, feat_bbox, feat_mask in \
             zip(range(num_obj), bboxes_target, feat_bboxes_target, feat_gt_masks):  # > #obj
             # NOTE: [1] use `gt_masks` to get `bboxes` and then downsize to get `feat_bboxes`
-            valid_bbox = len(bboxes_target[obj_id]) != 0
-            if valid_bbox:
-                bx1, by1, bx2, by2 = bbox.long().tolist()
-                bw, bh = max(bx2 - bx1, 1), max(by2 - by1, 1)
-                crop_mask = feat_mask[by1:by1+bh, bx1:bx1+bw]
-                masks_target.append(crop_mask.float())
-            bbox_keep.append(valid_bbox)
+            x1, y1, x2, y2 = bbox.tolist()
+            box_w, box_h = max(x2 - x1, 1), max(y2 - y1, 1)
+            crop_mask = feat_mask[y1:y1+box_h, x1:x1+box_w]  # (crop_h, crop_w)
+            masks_target.append(crop_mask.float())
 
             # NOTE: [2] use `feat_gt_masks` to get `feat_bboxes`
-            valid_feat_bbox = len(feat_bboxes_target[obj_id]) != 0
-            if valid_feat_bbox:
-                bx1, by1, bx2, by2 = feat_bbox.long().tolist()
-                bw, bh = max(bx2 - bx1, 1), max(by2 - by1, 1)
-                crop_mask = feat_mask[by1:by1+bh, bx1:bx1+bw]
-                feat_masks_target.append(crop_mask.float())
-            feat_bbox_keep.append(valid_feat_bbox)
-
-        bbox_keep = torch.BoolTensor(bbox_keep)
-        feat_bbox_keep = torch.BoolTensor(feat_bbox_keep)
+            x1, y1, x2, y2 = feat_bbox.tolist()
+            box_w, box_h = max(x2 - x1, 1), max(y2 - y1, 1)
+            crop_mask = feat_mask[y1:y1+box_h, x1:x1+box_w]  # (crop_h, crop_w)
+            feat_masks_target.append(crop_mask.float())
 
         if not self.crop_target:
             masks_target = feat_gt_masks.float()
         else:
-            # [2]
+            # [2] here uses `feat_gt_masks`
             bboxes_target = feat_bboxes_target
             masks_target = feat_masks_target
         return bboxes_target, masks_target
+
+    def _resize_masks(self, masks, shape, method='bilinear', squeeze=False):
+        assert len(masks.size()) >= 2
+        if len(masks.size()) == 2:
+            n, h, w = 1, masks.size(0), masks.size(1)
+        else:
+            n, h, w = masks.size()[-3:]
+        if len(masks.size()) != 4:
+            masks = masks.view(1, n, h, w)
+        if method == 'gap':
+            masks = F.adaptive_avg_pool2d(masks, shape)
+        elif method == 'gmp':
+            masks = F.adaptive_max_pool2d(masks, shape)
+        elif method == 'bilinear':
+            masks = F.interpolate(
+                masks, shape, mode='bilinear', align_corners=False)
+        else:
+            raise NotImplementedError
+
+        masks = masks.view(n, shape[0], shape[1])
+        if squeeze:
+            return masks.view(shape[0], shape[1])
+        return masks

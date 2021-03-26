@@ -205,7 +205,7 @@ class CenterNet(SingleStageMultiDetector):
         if issubclass(mask.dtype.type, np.floating):
             mask = (mask * 255).astype(np.uint8)
 
-        mask = cv2.normalize(mask, None, alpha=0, beta=255,
+        mask = cv2.normalize(~mask, None, alpha=0, beta=255,
                              norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
         mask = cv2.applyColorMap(mask, cv2.COLORMAP_JET).astype(dtype)
         blend = cv2.addWeighted(image, 1.0, mask, alpha, 0)
@@ -224,34 +224,6 @@ class CenterNet(SingleStageMultiDetector):
     def put_text(self, image, text, pos=(10, 35), font_size=0.8, thickness=2, color=(255, 87, 255)):
         cv2.putText(image, text, pos, cv2.FONT_HERSHEY_SIMPLEX,
                     font_size, color, thickness, cv2.LINE_AA)
-
-    def plot2image(self, filename, img, overlay=None, dtype=np.uint8):
-        """
-        SEE:
-            [1] https://stackoverflow.com/questions/50311861/matplotlib-figure-to-numpy-array-without-white-borders
-            [2] https://stackoverflow.com/questions/7821518/matplotlib-save-plot-to-numpy-array
-            [3] https://stackoverflow.com/questions/20051160/renderer-problems-using-matplotlib-from-within-a-script
-        """
-        fig = plt.figure()
-        ax = fig.gca()
-        ax.imshow(img)
-        if overlay is not None:
-            ax.imshow(overlay, cmap='jet', alpha=0.4)
-        ax.axis('tight')
-
-        plt.subplots_adjust(0, 0, 1, 1, 0, 0)
-        # plt.title(filename)
-        plt.xticks([])
-        plt.yticks([])
-        plt.grid(False)
-        plt.show()
-
-        fig.canvas.draw()
-        plot_img = np.fromstring(fig.canvas.tostring_rgb(), dtype=dtype, sep='')
-        w, h = fig.canvas.get_width_height()
-        plot_img = plot_img.reshape((h, w, 3))
-        plt.close()
-        return plot_img
 
 
 # SEE https://github.com/open-mmlab/mmdetection/issues/231
@@ -283,11 +255,11 @@ class TensorboardImageHook(TensorboardLoggerHook):
 
         if pred_imgs is not None:
             self.writer.add_image(
-                'image/preds', pred_imgs, runner.iter, dataformats='NHWC'
+                'image/saliency', pred_imgs, runner.iter, dataformats='NHWC'
             )
         if target_imgs is not None:
             self.writer.add_image(
-                'image/targets', target_imgs, runner.iter, dataformats='NHWC'
+                'image/mask_targets', target_imgs, runner.iter, dataformats='NHWC'
             )
 
     def show(self, img, img_shape, dpi=80):
