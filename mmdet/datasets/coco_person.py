@@ -109,7 +109,7 @@ class CocoPersonDataset(CocoDataset):
         gt_mask_all = np.zeros((height, width), dtype=np.uint8)
         gt_mask_miss = np.zeros((height, width), dtype=np.uint8)
         mask_crowd = None
-        ann_info = self.correct_mislabeled(img_info, ann_info)
+        img_info, ann_info = self.correct_mislabeled(img_info, ann_info)
         for i, ann in enumerate(ann_info):
             if ann.get('ignore', False) or ann['num_keypoints'] == 0:
                 continue
@@ -210,6 +210,9 @@ class CocoPersonDataset(CocoDataset):
 
     def correct_mislabeled(self, img_info, ann_info):
         img_name = img_info['file_name']
+        if img_info.get('corrected', False):  # corrected, return it
+            return img_info, ann_info
+
         if '000000223299' in img_name:
             for i, p in enumerate(ann_info):
                 num_keypoints = ann_info[i]['num_keypoints']
@@ -219,6 +222,7 @@ class CocoPersonDataset(CocoDataset):
                     keypoints = ann_info[i]['keypoints']
                     keypoints[15*3] += 37
                     ann_info[i]['keypoins'] = keypoints
+            img_info['corrected'] = True
         if '000000251523' in img_name:
             obj1_masks = ann_info[0]['segmentation']
             obj2_keypoints = ann_info[1]['keypoints']
@@ -237,6 +241,7 @@ class CocoPersonDataset(CocoDataset):
             ann_info[0]['num_keypoints'] = (np.array(new_keypoints)[2::3] > 0).sum()
             ann_info[0]['area'] = maskUtils.area(new_mask)
             del ann_info[1]
+            img_info['corrected'] = True
         if '000000001732' in img_name:
             obj_masks = ann_info[0]['segmentation']
             obj_masks = maskUtils.decode(self._poly2mask(obj_masks, img_info['height'], img_info['width']))  # (h, w)
@@ -255,6 +260,7 @@ class CocoPersonDataset(CocoDataset):
             ann_info[0]['segmentation'] = new_mask
             ann_info[0]['area'] = maskUtils.area(new_mask)
             # self._showAnns(img_info, ann_info)  # set box2xywh=True for showing
+            img_info['corrected'] = True
         if '000000044170' in img_name:
             obj_masks = ann_info[0]['segmentation']
             obj_masks = maskUtils.decode(self._poly2mask(obj_masks, img_info['height'], img_info['width']))  # (h, w)
@@ -274,9 +280,7 @@ class CocoPersonDataset(CocoDataset):
             ann_info[0]['bbox'] = new_bbox
             ann_info[0]['segmentation'] = new_mask
             ann_info[0]['area'] = maskUtils.area(new_mask)
-        # if '000000188465' in img_name:
-        #     self._showAnns(img_info, ann_info)
-        #     print()
+            img_info['corrected'] = True
         if '000000257336' in img_name:
             obj_masks = ann_info[0]['segmentation']
             obj_masks = maskUtils.decode(self._poly2mask(obj_masks, img_info['height'], img_info['width']))  # (h, w)
@@ -292,10 +296,8 @@ class CocoPersonDataset(CocoDataset):
             ann_info[0]['bbox'] = new_bbox
             ann_info[0]['segmentation'] = new_mask
             ann_info[0]['area'] = maskUtils.area(new_mask)
-        # if '000000231037' in img_name:
-            # self._showAnns(img_info, ann_info)
-            # print()
-        return ann_info
+            img_info['corrected'] = True
+        return img_info, ann_info
 
     def _showAnns(self, img_info, ann_info):
         import matplotlib.pyplot as plt

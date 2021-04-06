@@ -198,14 +198,17 @@ class SingleStageMultiDetector(BaseDetector):
             all_losses = self.group_losses(all_losses)
             all_losses = self.loss_balance(*all_losses)
         if self.show_tb_debug:
-            debug_results = self.debug_process(img, gt_inputs, all_preds, all_targets, all_metas)
+            debug_results = self.debug_train(img, all_preds, all_targets, all_metas, gt_inputs)
             return all_losses, debug_results
         return all_losses
 
     def group_losses(self, losses):
         return losses
 
-    def debug_process(self, imgs, gt_inputs, all_preds, all_targets, all_metas, show_results=False):
+    def debug_train(self, imgs, all_preds, all_targets, all_metas, gt_inputs, show_results=False):
+        pass
+
+    def debug_test(self, imgs, all_preds, all_metas, show_results=False):
         pass
 
     def simple_test(self, img, img_metas, rescale=False):
@@ -224,7 +227,7 @@ class SingleStageMultiDetector(BaseDetector):
         """
         x = self.extract_feat(img)
         all_preds = {}
-        all_metas = dict(bbox=None, mask=None, keypoint=None)
+        all_metas = dict(img=img_metas, bbox=None, mask=None, keypoint=None)
         all_results = dict(bbox=[[]], mask=[[]], keypoint=[[]])
         if self.with_bbox:
             x, all_preds = self.bbox_head.preprocess(x, all_preds)
@@ -341,11 +344,10 @@ class SingleStageMultiDetector(BaseDetector):
                 ]
 
             for i in inds:
-                i = int(i)
                 if num_labels > 1:
-                    color_mask = color_masks[labels[i]]
+                    color_mask = color_masks[labels[i] % num_colors]
                 else:
-                    color_mask = np.array([colors[i]])
+                    color_mask = np.array([colors[int(i) % num_colors]])
                 mask = segms[i].astype(bool)
                 img[mask] = img[mask] * 0.5 + color_mask * 0.5
 

@@ -127,13 +127,14 @@ class CenterNet(SingleStageMultiDetector):
             loss=loss, log_vars=log_vars, num_samples=len(data['img_metas']))
         if self.show_tb_debug:
             # `debug_results` is return by `debug_process()`
-            pred_feats, target_feats, filenames = debug_results
+            pred_feats, target_feats, pred_masks, filenames = debug_results
             outputs['pred_imgs'] = pred_feats
             outputs['target_imgs'] = target_feats
+            outputs['pred_masks'] = pred_masks
             outputs['filenames'] = filenames
         return outputs
 
-    def debug_process(self, imgs, gt_inputs, all_preds, all_targets, all_metas, show_results=False):
+    def debug_train(self, imgs, all_preds, all_targets, all_metas, gt_inputs, show_results=False):
         """
         This method is called in SingleStageMultiDetector.forward_train()
         SEE:
@@ -142,18 +143,29 @@ class CenterNet(SingleStageMultiDetector):
             [3] https://www.tensorflow.org/tensorboard/image_summaries
         """
         eps = 1e-12
-        feat_salient_maps, _ = all_preds['mask']
-        feat_salient_maps = torch.clamp(feat_salient_maps, min=eps, max=1 - eps).detach()
+        pred_ct_saliency, pred_ct_shape = all_preds['mask']
+        boxes_target, masks_target = all_targets['mask']
+        ct_ind_target = all_targets['bbox'][-1]
+        pred_ct_saliency = torch.clamp(pred_ct_saliency, min=eps, max=1 - eps).detach()
         img_metas = all_metas['img']
         mean, std, to_rgb, norm_rgb = img_metas[0]['img_norm_cfg'].values()
-        gt_bboxes, gt_masks, gt_keypoints, gt_labels = gt_inputs
+
+        gt_masks, = gt_inputs[1]
+
+        # preprocess predictions
+        batch, max_obj = ct_ind_target.size()
+        shape_dim = self.mask_head.shape_dim
+        pred_ct_saliency = torch.clamp(pred_ct_saliency, min=eps, max=1 - eps)
+        pred_ct_shape = torch.clamp(pred_ct_shape, min=eps, max=1 - eps)
+        pred_ct_shape = self.mask_head._transpose_and_gather_feat(pred_ct_shape, ct_ind_target)  # (B, SxS, H, W) -> (B, K, SxS)
+        pred_ct_shape = pred_ct_shape.view(batch, max_obj, shape_dim, shape_dim)
 
         # resize images to feature-scale
         img_shape = tuple(imgs[0].size()[1:])
         imgs = tensor2imgs(imgs.detach(), mean, std, to_rgb=False)  # (#img, feat_h, feat_w, 3)
 
         # resize saliency maps to image-scale
-        img_salient_maps = F.interpolate(feat_salient_maps, img_shape,
+        img_salient_maps = F.interpolate(pred_ct_saliency, img_shape,
                                          mode='bilinear', align_corners=False).squeeze()
         img_salient_maps = img_salient_maps.cpu().numpy() * 255  # (#img, img_h, img_w)
 
@@ -162,7 +174,7 @@ class CenterNet(SingleStageMultiDetector):
                           (255, 255, 0), (0, 255, 255), (255, 0, 255)]
         num_color = len(color_overlays)
         num_img = len(imgs)
-        filenames, blend_preds, blend_targets = [], [], []
+        filenames, blend_preds, blend_targets, blend_masks = [], [], [], []
         for img_id, img, gt_mask, img_saliency, meta in \
                 zip(range(num_img), imgs, gt_masks, img_salient_maps, img_metas):  # > #imgs: 16
             num_obj = gt_mask.size(0)
@@ -171,7 +183,7 @@ class CenterNet(SingleStageMultiDetector):
             filenames.append(filename)
             text = "[#obj=" + str(num_obj) + "] " + filename
 
-            # blend image-scale image and saliency map
+            # [1] blend image-scale image and saliency map
             img_blend = self.overlay_heatmap_to_image(img, img_saliency, dtype=np.uint8)
             self.put_text(img_blend, text)
             blend_preds.append(img_blend)
@@ -179,6 +191,7 @@ class CenterNet(SingleStageMultiDetector):
                 plt.imshow(img_blend)
                 plt.show()
 
+            # [2] overlay gt masks to image
             blend_target = img
             if num_obj == 0:
                 overlay_mask = np.zeros((img_shape[1], img_shape[0]), dtype=np.uint8)
@@ -188,14 +201,29 @@ class CenterNet(SingleStageMultiDetector):
                     blend_target = self.overlay_colormask_to_image(
                         blend_target, gt_mask[obj_id], color=color_overlays[obj_id % num_color])
             self.put_text(blend_target, text)
+            blend_targets.append(blend_target)
             if show_results:
                 plt.imshow(blend_target)
                 plt.show()
-            blend_targets.append(blend_target)
+
+            # [3] get pred masks and target masks
+            if num_obj > 0:
+                ct_saliency = pred_ct_saliency[img_id]
+                ct_shape = pred_ct_shape[img_id]
+                box_target = boxes_target[img_id]
+                pred_masks = self.mask_head.assemble_masks(ct_saliency, ct_shape, box_target, training=False)
+                pred_masks = F.interpolate(pred_masks.unsqueeze(0), img_shape,
+                                           mode='bilinear', align_corners=False).squeeze()
+
+                for i in range(num_obj):
+                    mask = pred_masks[i].detach().cpu().numpy() * 255  # (h, w)
+                    fm = self.overlay_heatmap_to_image(img, mask, dtype=np.uint8)
+                    blend_masks.append(fm)
+                blend_masks = torch.stack(blend_preds, dim=0)
         # (B, H, W, 3)
         blend_preds = np.stack(blend_preds)
         blend_targets = np.stack(blend_targets)
-        return blend_preds, blend_targets, filenames
+        return blend_preds, blend_targets, blend_masks, filenames
 
     def overlay_heatmap_to_image(self, image, mask, dtype=np.int32, alpha=0.3):
         if 0.0 <= mask.max() <= 1.0:
@@ -216,7 +244,7 @@ class CenterNet(SingleStageMultiDetector):
         # create a color overlay mask
         color_overlay = np.zeros(image.shape, np.uint8)
         color_overlay[:, :] = color
-        overlay_mask = cv2.bitwise_and(color_overlay, color_overlay, mask=mask)
+        overlay_mask = cv2.bitwise_and(color_overlay, color_overlay, mask=mask)#.astype(np.int32)
         # blend image mask with a overlay mask
         blend = cv2.addWeighted(image, 1.0, overlay_mask, alpha, 0)
         return blend
