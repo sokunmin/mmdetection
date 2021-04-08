@@ -127,10 +127,9 @@ class CenterNet(SingleStageMultiDetector):
             loss=loss, log_vars=log_vars, num_samples=len(data['img_metas']))
         if self.show_tb_debug:
             # `debug_results` is return by `debug_process()`
-            pred_feats, target_feats, pred_masks, filenames = debug_results
+            pred_feats, target_feats, filenames = debug_results
             outputs['pred_imgs'] = pred_feats
             outputs['target_imgs'] = target_feats
-            outputs['pred_masks'] = pred_masks
             outputs['filenames'] = filenames
         return outputs
 
@@ -150,7 +149,7 @@ class CenterNet(SingleStageMultiDetector):
         img_metas = all_metas['img']
         mean, std, to_rgb, norm_rgb = img_metas[0]['img_norm_cfg'].values()
 
-        gt_masks, = gt_inputs[1]
+        gt_masks = gt_inputs[1]
 
         # preprocess predictions
         batch, max_obj = ct_ind_target.size()
@@ -174,7 +173,7 @@ class CenterNet(SingleStageMultiDetector):
                           (255, 255, 0), (0, 255, 255), (255, 0, 255)]
         num_color = len(color_overlays)
         num_img = len(imgs)
-        filenames, blend_preds, blend_targets, blend_masks = [], [], [], []
+        filenames, blend_preds, blend_targets = [], [], []
         for img_id, img, gt_mask, img_saliency, meta in \
                 zip(range(num_img), imgs, gt_masks, img_salient_maps, img_metas):  # > #imgs: 16
             num_obj = gt_mask.size(0)
@@ -206,24 +205,10 @@ class CenterNet(SingleStageMultiDetector):
                 plt.imshow(blend_target)
                 plt.show()
 
-            # [3] get pred masks and target masks
-            if num_obj > 0:
-                ct_saliency = pred_ct_saliency[img_id]
-                ct_shape = pred_ct_shape[img_id]
-                box_target = boxes_target[img_id]
-                pred_masks = self.mask_head.assemble_masks(ct_saliency, ct_shape, box_target, training=False)
-                pred_masks = F.interpolate(pred_masks.unsqueeze(0), img_shape,
-                                           mode='bilinear', align_corners=False).squeeze()
-
-                for i in range(num_obj):
-                    mask = pred_masks[i].detach().cpu().numpy() * 255  # (h, w)
-                    fm = self.overlay_heatmap_to_image(img, mask, dtype=np.uint8)
-                    blend_masks.append(fm)
-                blend_masks = torch.stack(blend_preds, dim=0)
         # (B, H, W, 3)
         blend_preds = np.stack(blend_preds)
         blend_targets = np.stack(blend_targets)
-        return blend_preds, blend_targets, blend_masks, filenames
+        return blend_preds, blend_targets, filenames
 
     def overlay_heatmap_to_image(self, image, mask, dtype=np.int32, alpha=0.3):
         if 0.0 <= mask.max() <= 1.0:

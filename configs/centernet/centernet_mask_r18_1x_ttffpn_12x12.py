@@ -5,6 +5,7 @@ _base_ = [
 dataset_type = 'CocoPersonDataset'
 data_root = 'data/coco/'
 
+max_objs = 100
 # model settings
 model = dict(
     type='CenterNet',
@@ -35,6 +36,7 @@ model = dict(
         feat_channels=64,
         num_feat_levels=1,
         corner_emb_channels=0,
+        max_objs=max_objs,
         loss_heatmap=dict(
             type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1.0),
         loss_offset=dict(type='L1Loss', loss_weight=1.0),
@@ -46,8 +48,17 @@ model = dict(
         feat_channels=64,
         num_feat_levels=1,
         saliency_channels=1,
-        shape_channels=576,  # 576: 24x24, 1024: 32x32
-        resize_method='gmp',
+        shape_channels=64,  # 8X8: 64, 144: 12x12, 576: 24x24, 1024: 32x32
+        resize_method='bilinear',
+        crop_upsample_cfg=dict(
+            type='carafe',
+            up_kernel=5,
+            up_group=1,
+            scale_factor=2,
+            encoder_kernel=3,
+            encoder_dilation=1
+        ),
+        max_objs=max_objs,
         loss_mask=dict(
             type='CrossEntropyLoss', use_sigmoid=True, loss_weight=1.0)))
 # training and testing settings
@@ -94,7 +105,7 @@ test_pipeline = [
         flip=False,
         transforms=[
             dict(type='Resize'),
-            # dict(type='RandomFlip'),
+            dict(type='RandomFlip'),
             dict(type='Pad', size_divisor=32),
             dict(type='Normalize', **img_norm_cfg),
             dict(type='ImageToTensor', keys=['img']),
@@ -113,8 +124,8 @@ data = dict(
     train=dict(
         type=dataset_type,
         classes=classes,
-        ann_file=data_root + 'annotations/person_keypoints_train2017.json',
-        img_prefix=data_root + 'train2017/',
+        ann_file=data_root + 'annotations/person_keypoints_val2017.json',
+        img_prefix=data_root + 'val2017/',
         pipeline=train_pipeline),
     val=dict(
         type=dataset_type,

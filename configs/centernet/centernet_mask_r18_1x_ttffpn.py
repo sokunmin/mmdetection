@@ -47,7 +47,6 @@ model = dict(
         num_feat_levels=1,
         saliency_channels=1,
         shape_channels=576,  # 576: 24x24, 1024: 32x32
-        resize_method='gmp',
         loss_mask=dict(
             type='CrossEntropyLoss', use_sigmoid=True, loss_weight=1.0)))
 # training and testing settings
