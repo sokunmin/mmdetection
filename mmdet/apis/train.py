@@ -10,6 +10,7 @@ from mmcv.utils import build_from_cfg
 from mmdet.core import DistEvalHook, EvalHook
 from mmdet.datasets import (build_dataloader, build_dataset,
                             replace_ImageToTensor)
+from mmdet.models.optim.agc import AdaptiveGradientClippingHook
 from mmdet.utils import get_root_logger
 
 
@@ -98,6 +99,9 @@ def train_detector(model,
     if fp16_cfg is not None:
         optimizer_config = Fp16OptimizerHook(
             **cfg.optimizer_config, **fp16_cfg, distributed=distributed)
+    elif cfg.get('agc', None) is not None:
+        agc_cfg = cfg.get('agc', None)
+        optimizer_config = AdaptiveGradientClippingHook(**agc_cfg)
     elif distributed and 'type' not in cfg.optimizer_config:
         optimizer_config = OptimizerHook(**cfg.optimizer_config)
     else:

@@ -5,41 +5,38 @@ _base_ = [
 # model settings
 model = dict(
     type='CenterNet',
-    pretrained='torchvision://resnet18',
+    pretrained='./weights/hardnet68_base_bridge.pth',
     backbone=dict(
-        type='ResNet',
-        depth=18,
-        num_stages=4,
-        out_indices=(0, 1, 2, 3),
-        frozen_stages=1,
-        norm_cfg=dict(type='BN', requires_grad=True),
-        norm_eval=True,
-        style='pytorch'),
+        type='HarDNet',
+        stem_channels=(32, 64),
+        stage_layers=(8, 16, 16, 16),
+        stage_channels=(128, 256, 320, 640),
+        growth_rate=(14, 16, 20, 40),
+        growth_mult=1.7,
+        skip_nodes=(1, 3, 8, 13),
+        norm_cfg=dict(type='BN', requires_grad=True)),
     neck=dict(
-        type='CenterFPN',
-        in_channels=(512, 256, 128, 64),
-        out_channels=64,
-        level_index=0,
-        reverse_levels=True,
-        with_last_norm=True,
-        with_last_relu=True,
-        upsample_cfg=dict(
-            type='deconv',
-            kernel_size=4,
-            stride=2,
-            padding=1,
-            output_padding=0,
-            bias=False)),
+        type='HarDFPN',
+        in_channels=(654, 576),
+        feat_channels=(192, 72),
+        stage_channels=(224, 96, 64),
+        stage_layers=(8, 8, 4),
+        growth_rate=(48, 32, 20),
+        growth_mult=1.7,
+        skip_channels=(64, 124, 328, 654),
+        skip_level=3,
+        sc=(32, 32, 0),
+        norm_cfg=dict(type='BN', requires_grad=True)),
     bbox_head=dict(
         type='CenterHead',
         num_classes=80,
-        in_channels=64,
-        feat_channels=64,
+        in_channels=200,
+        feat_channels=(320, 128),
         num_feat_levels=1,
         corner_emb_channels=0,
         loss_heatmap=dict(
-            type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1),
-        loss_offset=dict(type='L1Loss', loss_weight=1.0),
+            type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1.0),
+        loss_offset=None,
         loss_bbox=dict(type='L1Loss', loss_weight=0.1)))
 # training and testing settings
 train_cfg = dict(
@@ -99,7 +96,7 @@ test_pipeline = [
 ]
 
 data = dict(
-    samples_per_gpu=32,
+    samples_per_gpu=16,
     workers_per_gpu=2,
     train=dict(pipeline=train_pipeline),
     val=dict(pipeline=test_pipeline),

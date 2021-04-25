@@ -2,9 +2,6 @@ _base_ = [
     '../_base_/default_runtime.py', '../_base_/datasets/coco_detection.py'
 ]
 
-dataset_type = 'CocoPersonDataset'
-data_root = 'data/coco/'
-
 # model settings
 model = dict(
     type='CenterNet',
@@ -14,9 +11,10 @@ model = dict(
         depth=18,
         num_stages=4,
         out_indices=(0, 1, 2, 3),
-        frozen_stages=1,
+        frozen_stages=-1,
         norm_cfg=dict(type='BN', requires_grad=True),
-        norm_eval=True,
+        norm_eval=False,
+        zero_init_residual=False,
         style='pytorch'),
     neck=dict(
         type='CenterFPN',
@@ -24,18 +22,13 @@ model = dict(
         out_channels=64,
         level_index=0,
         reverse_levels=True,
-        with_last_norm=True,
-        with_last_relu=True,
-        upsample_cfg=dict(
-            type='deconv',
-            kernel_size=4,
-            stride=2,
-            padding=1,
-            output_padding=0,
-            bias=False)),
+        with_last_norm=False,
+        with_last_relu=False,
+        upsample_cfg=dict(type='bilinear'),
+        shortcut_convs=(1, 2, 3)),
     bbox_head=dict(
         type='CenterHead',
-        num_classes=1,
+        num_classes=80,
         in_channels=64,
         feat_channels=64,
         num_feat_levels=1,
@@ -43,18 +36,7 @@ model = dict(
         loss_heatmap=dict(
             type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1),
         loss_offset=dict(type='L1Loss', loss_weight=1.0),
-        loss_bbox=dict(type='L1Loss', loss_weight=0.1)),
-    mask_head=dict(
-        type='CenterMaskHead',
-        num_classes=1,
-        in_channels=64,
-        feat_channels=64,
-        num_feat_levels=1,
-        saliency_channels=1,
-        shape_channels=576,  # 576: 24x24, 1024: 32x32
-        loss_mask=dict(
-            type='CrossEntropyLoss', use_sigmoid=True, loss_weight=1.0)),
-    show_tb_debug=True)
+        loss_bbox=dict(type='L1Loss', loss_weight=0.1)))
 # training and testing settings
 train_cfg = dict(
     vis_every_n_iters=100,
@@ -62,15 +44,16 @@ train_cfg = dict(
     debug=False)
 test_cfg = dict(
     score_thr=0.01,
-    mask_score_thr=0.4,
     max_per_img=100)
+# dataset settings, SEE: Normalize RGB https://aishack.in/tutorials/normalized-rgb/
 img_norm_cfg = dict(
+    # NOTE: add `norm_rgb=True` if eval offical pretrained weights
+    # mean=[0.408, 0.447, 0.470], std=[0.289, 0.274, 0.278], to_rgb=False, norm_rgb=True)
+    # mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], to_rgb=False, norm_rgb=True)
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 train_pipeline = [
     dict(type='LoadImageFromFile', to_float32=True),
-    dict(type='LoadAnnotations',
-         with_bbox=True,
-         with_mask=True),
+    dict(type='LoadAnnotations', with_bbox=True),
     dict(type='PhotoMetricDistortion',
          brightness_delta=32,
          contrast_range=(0.5, 1.5),
@@ -82,14 +65,13 @@ train_pipeline = [
          ratios=(0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3),
          test_mode=False,
          test_pad_mode=None,
-         with_mask2bbox=True,
          **img_norm_cfg),
     dict(type='Resize', img_scale=(512, 512), keep_ratio=False),
     dict(type='RandomFlip', flip_ratio=0.5),
     dict(type='Pad', size_divisor=32),
     dict(type='Normalize', **img_norm_cfg),
     dict(type='DefaultFormatBundle'),
-    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels', 'gt_masks'])
+    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels']),
 ]
 test_pipeline = [
     dict(type='LoadImageFromFile', to_float32=True),
@@ -111,30 +93,15 @@ test_pipeline = [
         ])
 ]
 
-classes = ('person',)
 data = dict(
-    samples_per_gpu=16,
+    samples_per_gpu=32,
     workers_per_gpu=2,
-    train=dict(
-        type=dataset_type,
-        classes=classes,
-        ann_file=data_root + 'annotations/person_keypoints_train2017.json',
-        img_prefix=data_root + 'train2017/',
-        pipeline=train_pipeline),
-    val=dict(
-        type=dataset_type,
-        classes=classes,
-        ann_file=data_root + 'annotations/person_keypoints_val2017.json',
-        img_prefix=data_root + 'val2017/',
-        pipeline=test_pipeline),
-    test=dict(
-        type=dataset_type,
-        classes=classes,
-        ann_file=data_root + 'annotations/person_keypoints_val2017.json',
-        img_prefix=data_root + 'val2017/',
-        pipeline=test_pipeline))
+    train=dict(pipeline=train_pipeline),
+    val=dict(pipeline=test_pipeline),
+    test=dict(pipeline=test_pipeline))
 # optimizer
-optimizer = dict(type='Adam', lr=0.00025)
+optimizer = dict(type='SGD', lr=0.01, momentum=0.9, weight_decay=0.0004,
+                 paramwise_cfg=dict(bias_lr_mult=2., bias_decay_mult=0.))
 optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 # learning policy
 lr_config = dict(
@@ -142,17 +109,10 @@ lr_config = dict(
     warmup='linear',
     warmup_iters=1000,
     warmup_ratio=1.0 / 5,
-    step=[120])
+    step=[90, 120])
 checkpoint_config = dict(interval=5)
-evaluation = dict(interval=1, metric=['bbox', 'segm'], multitask=True)
+evaluation = dict(interval=1, metric=['bbox'], multitask=True)
 # runtime settings
-total_epochs = 130
+total_epochs = 140
 cudnn_benchmark = True
 find_unused_parameters = True
-
-log_config = dict(
-    interval=10,
-    hooks=[
-        dict(type='TextLoggerHook'),
-        dict(type='TensorboardImageHook'),
-    ])

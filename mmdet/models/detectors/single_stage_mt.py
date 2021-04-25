@@ -353,16 +353,16 @@ class SingleStageMultiDetector(BaseDetector):
 
         if keypoint_result:
             num_joints = self.keypoint_head.num_classes
-            keypoints = np.vstack(keypoint_result)  # (B, K, ((xyv) * #kp + bbox_score)
+            keypoints = np.vstack(keypoint_result)  # (B, K, ((xyv) * #kp)
             kp_shape = keypoints.shape
-            joints = keypoints[bbox_keep, :-1].reshape(num_objs, kp_shape[1] // 3, 3).astype(dtype=np.int32)
+            joints = keypoints[bbox_keep].reshape(num_objs, kp_shape[1] // 3, 3)
             limbs = self.keypoint_head.limbs
             for i, joint in zip(range(num_objs), joints):  # > #objs
                 color = colors[i % num_colors]
                 for l, limb_ind in enumerate(limbs):  # `limbs`: (#kp, 2)
                     if all(joint[limb_ind, 2] > 0.):  # joints on a limb are above
-                        src_pt = tuple(joint[limb_ind, :2][0])
-                        dst_pt = tuple(joint[limb_ind, :2][1])
+                        src_pt = tuple(np.round(joint[limb_ind, :2][0]).astype(np.int32))
+                        dst_pt = tuple(np.round(joint[limb_ind, :2][1]).astype(np.int32))
                         cv2.line(img, src_pt, dst_pt, color, thickness=2, lineType=cv2.LINE_AA)
 
                 for j in range(num_joints):

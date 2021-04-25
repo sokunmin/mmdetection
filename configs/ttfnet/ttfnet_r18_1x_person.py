@@ -11,9 +11,10 @@ model = dict(
         depth=18,
         num_stages=4,
         out_indices=(0, 1, 2, 3),
-        frozen_stages=1,
+        frozen_stages=-1,
         norm_cfg=dict(type='BN', requires_grad=True),
-        norm_eval=True,
+        norm_eval=False,
+        zero_init_residual=False,
         style='pytorch'),
     neck=dict(
         type='CenterFPN',
@@ -77,13 +78,28 @@ test_pipeline = [
             dict(type='Collect', keys=['img']),
         ])
 ]
-classes = ('person', )
+
+dataset_type = 'CocoPersonDataset'
+data_root = 'data/coco/'
+
 data = dict(
     samples_per_gpu=32,
     workers_per_gpu=2,
-    train=dict(classes=classes, pipeline=train_pipeline),
-    val=dict(classes=classes, pipeline=test_pipeline),
-    test=dict(classes=classes, pipeline=test_pipeline))
+    train=dict(
+        type=dataset_type,
+        ann_file=data_root + 'annotations/person_keypoints_val2017.json',
+        img_prefix=data_root + 'val2017/',
+        pipeline=train_pipeline),
+    val=dict(
+        type=dataset_type,
+        ann_file=data_root + 'annotations/person_keypoints_val2017.json',
+        img_prefix=data_root + 'val2017/',
+        pipeline=test_pipeline),
+    test=dict(
+        type=dataset_type,
+        ann_file=data_root + 'annotations/person_keypoints_val2017.json',
+        img_prefix=data_root + 'val2017/',
+        pipeline=test_pipeline))
 # optimizer
 optimizer = dict(type='SGD', lr=0.016, momentum=0.9, weight_decay=0.0004,
                  paramwise_cfg=dict(bias_lr_mult=2., bias_decay_mult=0.))
@@ -96,6 +112,8 @@ lr_config = dict(
     warmup_ratio=1.0 / 5,
     step=[9, 11])
 checkpoint_config = dict(interval=1)
+evaluation = dict(interval=1, metric=['bbox'], multitask=True)
+find_unused_parameters = True
 # yapf:enable
 cudnn_benchmark = True
 # runtime settings

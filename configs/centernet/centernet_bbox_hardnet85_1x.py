@@ -5,36 +5,38 @@ _base_ = [
 # model settings
 model = dict(
     type='CenterNet',
-    pretrained='torchvision://resnet18',
+    pretrained='./weights/hardnet85_base.pth',
     backbone=dict(
-        type='ResNet',
-        depth=18,
-        num_stages=4,
-        out_indices=(0, 1, 2, 3),
-        frozen_stages=1,
-        norm_cfg=dict(type='BN', requires_grad=True),
-        norm_eval=True,
-        style='pytorch'),
+        type='HarDNet',
+        stem_channels=(48, 96),
+        stage_layers=(8, 16, 16, 16, 16),
+        stage_channels=(192, 256, 320, 480, 720),
+        growth_rate=(24, 24, 28, 36, 48),
+        growth_mult=1.7,
+        skip_nodes=(1, 3, 8, 13),
+        norm_cfg=dict(type='BN', requires_grad=True)),
     neck=dict(
-        type='CenterFPN',
-        in_channels=(512, 256, 128, 64),
-        out_channels=64,
-        level_index=0,
-        reverse_levels=True,
-        with_last_norm=False,
-        with_last_relu=False,
-        upsample_cfg=dict(type='bilinear'),
-        shortcut_convs=(1, 2, 3)),
+        type='HarDFPN',
+        in_channels=(784, 768),
+        feat_channels=(256, 80),
+        stage_channels=(224, 160, 96),
+        stage_layers=(8, 8, 4),
+        growth_rate=(64, 48, 28),
+        growth_mult=1.7,
+        skip_channels=(96, 214, 458, 784),
+        skip_level=3,
+        sc=(32, 32, 0),
+        norm_cfg=dict(type='BN', requires_grad=True)),
     bbox_head=dict(
         type='CenterHead',
-        num_classes=1,
-        in_channels=64,
-        feat_channels=64,
+        num_classes=80,
+        in_channels=200,
+        feat_channels=(320, 128),
         num_feat_levels=1,
         corner_emb_channels=0,
         loss_heatmap=dict(
-            type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1),
-        loss_offset=dict(type='L1Loss', loss_weight=1.0),
+            type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1.0),
+        loss_offset=None,
         loss_bbox=dict(type='L1Loss', loss_weight=0.1)))
 # training and testing settings
 train_cfg = dict(
@@ -92,13 +94,13 @@ test_pipeline = [
                            'scale_factor', 'flip', 'img_norm_cfg')),
         ])
 ]
-classes = ('person', )
+
 data = dict(
-    samples_per_gpu=32,
+    samples_per_gpu=16,
     workers_per_gpu=2,
-    train=dict(classes=classes, pipeline=train_pipeline),
-    val=dict(classes=classes, pipeline=test_pipeline),
-    test=dict(classes=classes, pipeline=test_pipeline))
+    train=dict(pipeline=train_pipeline),
+    val=dict(pipeline=test_pipeline),
+    test=dict(pipeline=test_pipeline))
 # optimizer
 optimizer = dict(type='SGD', lr=0.01, momentum=0.9, weight_decay=0.0004,
                  paramwise_cfg=dict(bias_lr_mult=2., bias_decay_mult=0.))

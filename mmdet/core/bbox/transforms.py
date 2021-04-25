@@ -119,10 +119,10 @@ def bbox2result(bboxes, labels, num_classes):
 
 def keypoint2result(keypoints, num_joints):
     """ Only supported for SingleStageMultiDetector
-    keypoints: (K, (x,y,v) * #joints + score)
+    keypoints: (K, (x,y,v) * #joints)
     """
     if keypoints.shape[0] == 0:
-        return [np.zeros((0, num_joints * 3 + 1), dtype=np.float32)]
+        return [np.zeros((0, num_joints * 3), dtype=np.float32)]
     else:
         if isinstance(keypoints, torch.Tensor):
             keypoints = keypoints.cpu().numpy()

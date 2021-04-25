@@ -11,9 +11,10 @@ model = dict(
         depth=18,
         num_stages=4,
         out_indices=(0, 1, 2, 3),
-        frozen_stages=1,
+        frozen_stages=-1,
         norm_cfg=dict(type='BN', requires_grad=True),
-        norm_eval=True,
+        norm_eval=False,
+        zero_init_residual=False,
         style='pytorch'),
     neck=dict(
         type='CenterFPN',
@@ -21,15 +22,10 @@ model = dict(
         out_channels=64,
         level_index=0,
         reverse_levels=True,
-        with_last_norm=True,
-        with_last_relu=True,
-        upsample_cfg=dict(
-            type='deconv',
-            kernel_size=4,
-            stride=2,
-            padding=1,
-            output_padding=0,
-            bias=False)),
+        with_last_norm=False,
+        with_last_relu=False,
+        upsample_cfg=dict(type='bilinear'),
+        shortcut_convs=(1, 2, 3)),
     bbox_head=dict(
         type='CenterHead',
         num_classes=1,
@@ -97,7 +93,7 @@ test_pipeline = [
                            'scale_factor', 'flip', 'img_norm_cfg')),
         ])
 ]
-classes = ('person', )
+classes = ('person',)
 data = dict(
     samples_per_gpu=32,
     workers_per_gpu=2,
@@ -115,7 +111,8 @@ lr_config = dict(
     warmup_iters=1000,
     warmup_ratio=1.0 / 5,
     step=[90, 120])
-checkpoint_config = dict(interval=1)
+checkpoint_config = dict(interval=5)
+evaluation = dict(interval=1, metric=['bbox'], multitask=True)
 # runtime settings
 total_epochs = 140
 cudnn_benchmark = True

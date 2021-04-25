@@ -14,9 +14,10 @@ model = dict(
         depth=18,
         num_stages=4,
         out_indices=(0, 1, 2, 3),
-        frozen_stages=1,
+        frozen_stages=-1,
         norm_cfg=dict(type='BN', requires_grad=True),
-        norm_eval=True,
+        norm_eval=False,
+        zero_init_residual=False,
         style='pytorch'),
     neck=dict(
         type='CenterFPN',
@@ -109,7 +110,6 @@ test_pipeline = [
                            'scale_factor', 'flip', 'img_norm_cfg')),
         ])
 ]
-
 classes = ('person',)
 data = dict(
     samples_per_gpu=32,

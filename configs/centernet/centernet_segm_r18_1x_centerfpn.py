@@ -14,9 +14,10 @@ model = dict(
         depth=18,
         num_stages=4,
         out_indices=(0, 1, 2, 3),
-        frozen_stages=1,
+        frozen_stages=-1,
         norm_cfg=dict(type='BN', requires_grad=True),
-        norm_eval=True,
+        norm_eval=False,
+        zero_init_residual=False,
         style='pytorch'),
     neck=dict(
         type='CenterFPN',
@@ -24,10 +25,15 @@ model = dict(
         out_channels=64,
         level_index=0,
         reverse_levels=True,
-        with_last_norm=False,
-        with_last_relu=False,
-        upsample_cfg=dict(type='bilinear'),
-        shortcut_convs=(1, 2, 3)),
+        with_last_norm=True,
+        with_last_relu=True,
+        upsample_cfg=dict(
+            type='deconv',
+            kernel_size=4,
+            stride=2,
+            padding=1,
+            output_padding=0,
+            bias=False)),
     bbox_head=dict(
         type='CenterHead',
         num_classes=1,
@@ -36,7 +42,7 @@ model = dict(
         num_feat_levels=1,
         corner_emb_channels=0,
         loss_heatmap=dict(
-            type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1.0),
+            type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1),
         loss_offset=dict(type='L1Loss', loss_weight=1.0),
         loss_bbox=dict(type='L1Loss', loss_weight=0.1)),
     mask_head=dict(
@@ -47,7 +53,6 @@ model = dict(
         num_feat_levels=1,
         saliency_channels=1,
         shape_channels=576,  # 576: 24x24, 1024: 32x32
-        crop_upsample_cfg=None,
         loss_mask=dict(
             type='CrossEntropyLoss', use_sigmoid=True, loss_weight=1.0)))
 # training and testing settings
@@ -94,7 +99,7 @@ test_pipeline = [
         flip=False,
         transforms=[
             dict(type='Resize'),
-            # dict(type='RandomFlip'),
+            dict(type='RandomFlip'),
             dict(type='Pad', size_divisor=32),
             dict(type='Normalize', **img_norm_cfg),
             dict(type='ImageToTensor', keys=['img']),
@@ -105,10 +110,9 @@ test_pipeline = [
                            'scale_factor', 'flip', 'img_norm_cfg')),
         ])
 ]
-
 classes = ('person',)
 data = dict(
-    samples_per_gpu=16,
+    samples_per_gpu=32,
     workers_per_gpu=2,
     train=dict(
         type=dataset_type,
@@ -129,7 +133,7 @@ data = dict(
         img_prefix=data_root + 'val2017/',
         pipeline=test_pipeline))
 # optimizer
-optimizer = dict(type='Adam', lr=0.00025)
+optimizer = dict(type='Adam', lr=0.001)
 optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 # learning policy
 lr_config = dict(
@@ -146,7 +150,7 @@ cudnn_benchmark = True
 find_unused_parameters = True
 
 log_config = dict(
-    interval=10,
+    interval=5,
     hooks=[
         dict(type='TextLoggerHook'),
         dict(type='TensorboardImageHook'),

@@ -1607,8 +1607,7 @@ class RandomCenterCropPad(object):
                     results[key] = bboxes
                     if key in ['gt_bboxes']:
                         if 'gt_labels' in results:
-                            labels = results['gt_labels'][mask]
-                            labels = labels[keep]
+                            labels = results['gt_labels'][mask][keep]
                             results['gt_labels'] = labels
                         if 'gt_masks' in results:
                             if self.with_mask2bbox:
@@ -1629,7 +1628,13 @@ class RandomCenterCropPad(object):
                             # > DEBUG: filter out bboxes without any keypoints
                             patch = np.array([0, 0, cropped_img.shape[0], cropped_img.shape[1]])
                             mask = self._filter_boxes(patch, bboxes, keypoints, kp_in_box=True)
-                            results[key] = results[key][mask]
+                            gt_boxes = results[key]
+                            if len(gt_boxes.shape) < 2:
+                                gt_boxes = gt_boxes.reshape(1, 4)
+                            results[key] = gt_boxes[mask]
+                            gt_masks = results['gt_masks']
+                            if len(gt_masks.masks.shape) < 3:
+                                gt_masks = gt_masks.masks.reshape(1, new_h, new_w)
                             results['gt_masks'] = gt_masks[mask]
                             results['gt_keypoints'] = keypoints[mask]
                 # crop semantic seg

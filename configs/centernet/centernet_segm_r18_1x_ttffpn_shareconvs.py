@@ -25,36 +25,35 @@ model = dict(
         out_channels=64,
         level_index=0,
         reverse_levels=True,
-        with_last_norm=True,
-        with_last_relu=True,
-        upsample_cfg=dict(
-            type='deconv',
-            kernel_size=4,
-            stride=2,
-            padding=1,
-            output_padding=0,
-            bias=False)),
+        with_last_norm=False,
+        with_last_relu=False,
+        upsample_cfg=dict(type='bilinear'),
+        shortcut_convs=(1, 2, 3)),
     bbox_head=dict(
         type='CenterHead',
         num_classes=1,
         in_channels=64,
         feat_channels=64,
+        stacked_convs=0,
+        share_stacked_convs=3,
         num_feat_levels=1,
         corner_emb_channels=0,
         loss_heatmap=dict(
-            type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1),
+            type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1.0),
         loss_offset=dict(type='L1Loss', loss_weight=1.0),
         loss_bbox=dict(type='L1Loss', loss_weight=0.1)),
-    keypoint_head=dict(
-        type='CenterPoseHead',
-        num_classes=17,
+    mask_head=dict(
+        type='CenterMaskHead',
+        num_classes=1,
         in_channels=64,
         feat_channels=64,
         num_feat_levels=1,
-        loss_heatmap=dict(
-            type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1),
-        loss_offset=dict(type='L1Loss', loss_weight=1.0),
-        loss_joint=dict(type='L1Loss', loss_weight=1.0)))
+        saliency_channels=1,
+        stacked_convs=0,
+        with_share_convs=True,
+        shape_channels=576,  # 576: 24x24, 1024: 32x32
+        loss_mask=dict(
+            type='CrossEntropyLoss', use_sigmoid=True, loss_weight=1.0)))
 # training and testing settings
 train_cfg = dict(
     vis_every_n_iters=100,
@@ -62,20 +61,15 @@ train_cfg = dict(
     debug=False)
 test_cfg = dict(
     score_thr=0.01,
-    kp_score_thr=0.1,
+    mask_score_thr=0.4,
     max_per_img=100)
-# dataset settings, SEE: Normalize RGB https://aishack.in/tutorials/normalized-rgb/
 img_norm_cfg = dict(
-    # NOTE: add `norm_rgb=True` if eval offical pretrained weights
-    # mean=[0.408, 0.447, 0.470], std=[0.289, 0.274, 0.278], to_rgb=False, norm_rgb=True)
-    # mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], to_rgb=False, norm_rgb=True)
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 train_pipeline = [
     dict(type='LoadImageFromFile', to_float32=True),
     dict(type='LoadAnnotations',
          with_bbox=True,
-         with_mask=True,
-         with_keypoint=True),
+         with_mask=True),
     dict(type='PhotoMetricDistortion',
          brightness_delta=32,
          contrast_range=(0.5, 1.5),
@@ -94,7 +88,7 @@ train_pipeline = [
     dict(type='Pad', size_divisor=32),
     dict(type='Normalize', **img_norm_cfg),
     dict(type='DefaultFormatBundle'),
-    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels', 'gt_masks', 'gt_keypoints'])
+    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels', 'gt_masks'])
 ]
 test_pipeline = [
     dict(type='LoadImageFromFile', to_float32=True),
@@ -104,7 +98,7 @@ test_pipeline = [
         flip=False,
         transforms=[
             dict(type='Resize'),
-            dict(type='RandomFlip'),
+            # dict(type='RandomFlip'),
             dict(type='Pad', size_divisor=32),
             dict(type='Normalize', **img_norm_cfg),
             dict(type='ImageToTensor', keys=['img']),
@@ -146,10 +140,17 @@ lr_config = dict(
     warmup='linear',
     warmup_iters=1000,
     warmup_ratio=1.0 / 5,
-    step=[270, 300])
-checkpoint_config = dict(interval=10)
-evaluation = dict(interval=1, metric=['bbox', 'keypoints'], multitask=True)
+    step=[120])
+checkpoint_config = dict(interval=5)
+evaluation = dict(interval=1, metric=['bbox', 'segm'], multitask=True)
 # runtime settings
-total_epochs = 320
+total_epochs = 130
 cudnn_benchmark = True
 find_unused_parameters = True
+
+log_config = dict(
+    interval=5,
+    hooks=[
+        dict(type='TextLoggerHook'),
+        dict(type='TensorboardImageHook'),
+    ])

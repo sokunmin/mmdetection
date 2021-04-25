@@ -121,6 +121,7 @@ ckpt_aliases = {
     'ttfnet': 'tools.convert_checkpoint.ttfnet',
     'centernet': 'tools.convert_checkpoint.centernet',
     'centerpose': 'tools.convert_checkpoint.centerpose',
+    'hardnet': 'tools.convert_checkpoint.hardnet',
 }
 
 

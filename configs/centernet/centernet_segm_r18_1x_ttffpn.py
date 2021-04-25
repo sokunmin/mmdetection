@@ -14,9 +14,10 @@ model = dict(
         depth=18,
         num_stages=4,
         out_indices=(0, 1, 2, 3),
-        frozen_stages=1,
+        frozen_stages=-1,
         norm_cfg=dict(type='BN', requires_grad=True),
-        norm_eval=True,
+        norm_eval=False,
+        zero_init_residual=False,
         style='pytorch'),
     neck=dict(
         type='CenterFPN',
@@ -35,6 +36,7 @@ model = dict(
         feat_channels=64,
         num_feat_levels=1,
         corner_emb_channels=0,
+        share_stacked_convs=0,
         loss_heatmap=dict(
             type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1.0),
         loss_offset=dict(type='L1Loss', loss_weight=1.0),
@@ -48,7 +50,7 @@ model = dict(
         saliency_channels=1,
         shape_channels=576,  # 576: 24x24, 1024: 32x32
         loss_mask=dict(
-            type='CrossEntropyLoss', use_sigmoid=True, loss_weight=1.0)))
+            type='CrossEntropyLoss', use_sigmoid=True, loss_weight=1.2)))
 # training and testing settings
 train_cfg = dict(
     vis_every_n_iters=100,
@@ -104,10 +106,9 @@ test_pipeline = [
                            'scale_factor', 'flip', 'img_norm_cfg')),
         ])
 ]
-
 classes = ('person',)
 data = dict(
-    samples_per_gpu=16,
+    samples_per_gpu=32,
     workers_per_gpu=2,
     train=dict(
         type=dataset_type,
@@ -128,7 +129,7 @@ data = dict(
         img_prefix=data_root + 'val2017/',
         pipeline=test_pipeline))
 # optimizer
-optimizer = dict(type='Adam', lr=0.00025)
+optimizer = dict(type='Adam', lr=0.001)
 optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 # learning policy
 lr_config = dict(
@@ -145,7 +146,7 @@ cudnn_benchmark = True
 find_unused_parameters = True
 
 log_config = dict(
-    interval=10,
+    interval=5,
     hooks=[
         dict(type='TextLoggerHook'),
         dict(type='TensorboardImageHook'),

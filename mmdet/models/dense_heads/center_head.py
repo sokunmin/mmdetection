@@ -14,12 +14,34 @@ from ..builder import HEADS, build_loss
 from ..utils import gaussian_radius, gen_gaussian_target
 
 
+def build_convs(in_channel, feat_channel, stacked_convs):
+    head_convs = []
+    for i in range(stacked_convs):
+        chn = in_channel if i == 0 else feat_channel
+        head_convs.append(ConvModule(
+            chn, feat_channel, 3,
+            padding=1, bias=True, act_cfg=dict(type='ReLU', inplace=True)))
+    return head_convs
+
+
+def build_share_convs(in_channel, feat_channel, stacked_convs):
+    if stacked_convs == 0:
+        return nn.Identity()
+    return nn.Sequential(*build_convs(in_channel, feat_channel, stacked_convs))
+
+
+def build_head(in_channel, feat_channel, stacked_convs, out_channel):
+    head_convs = build_convs(in_channel, feat_channel, stacked_convs)
+    head_convs.append(nn.Conv2d(feat_channel, out_channel, 1))
+    return nn.Sequential(*head_convs)
+
+
 @HEADS.register_module
 class CenterHead(CornerHead):
-
     def __init__(self,
                  *args,
                  stacked_convs=1,
+                 share_stacked_convs=0,
                  feat_channels=256,
                  max_objs=128,
                  loss_bbox=dict(type='L1Loss', loss_weight=0.1),
@@ -27,30 +49,25 @@ class CenterHead(CornerHead):
         self.stacked_convs = stacked_convs
         self.feat_channels = feat_channels
         self.max_objs = max_objs
+        self.share_stacked_convs = share_stacked_convs
+        self.with_share_convs = share_stacked_convs > 0
         super(CenterHead, self).__init__(*args, **kwargs)
         self.loss_bbox = build_loss(loss_bbox)
         self.loss_embedding = None
         self.fp16_enabled = False
 
-    def build_head(self, in_channel, feat_channel, stacked_convs, out_channel):
-        head_convs = [ConvModule(
-            in_channel, feat_channel, 3,
-            padding=1, bias=True, act_cfg=dict(type='ReLU', inplace=True))]
-        for i in range(1, stacked_convs):
-            head_convs.append(ConvModule(
-                feat_channel, feat_channel, 3,
-                padding=1, bias=True, act_cfg=dict(type='ReLU', inplace=True)))
-
-        head_convs.append(nn.Conv2d(feat_channel, out_channel, 1))
-        return nn.Sequential(*head_convs)
-
     def _init_layers(self):
-        self.ct_hm_head = self.build_head(
-            self.in_channels, self.feat_channels, self.stacked_convs, self.num_classes)
-        self.ct_reg_head = self.build_head(
-            self.in_channels, self.feat_channels, self.stacked_convs, 2)
-        self.ct_wh_head = self.build_head(
-            self.in_channels, self.feat_channels, self.stacked_convs, 2)
+        feat_channels = self.feat_channels
+        stacked_convs = self.stacked_convs
+        head_in_channel = feat_channels if self.with_share_convs else self.in_channels
+        self.share_convs = build_share_convs(
+            self.in_channels, feat_channels, self.share_stacked_convs)
+        self.ct_hm_head = build_head(
+            head_in_channel, feat_channels, stacked_convs, self.num_classes)
+        self.ct_wh_head = build_head(
+            head_in_channel, feat_channels, stacked_convs, 2)
+        self.ct_reg_head = build_head(
+            head_in_channel, feat_channels, stacked_convs, 2)
 
     def init_weights(self):
         for _, m in self.ct_hm_head.named_modules():
@@ -75,9 +92,14 @@ class CenterHead(CornerHead):
             hm: tensor, (batch, 80, h, w).
             wh: tensor, (batch, 4, h, w) or (batch, 80 * 4, h, w).
         """
-        ct_hm = self.ct_hm_head(x)  # > (B, #cls, 128, 128)
-        ct_offset = self.ct_reg_head(x)  # > (B, 2, 128, 128)
-        ct_wh = self.ct_wh_head(x)  # > (B, 2, 128, 128)
+        feats = x
+        if self.with_share_convs:
+            feats = self.share_convs(feats)
+        ct_hm = self.ct_hm_head(feats)  # > (B, #cls, 128, 128)
+        ct_wh = self.ct_wh_head(feats)  # > (B, 2, 128, 128)
+        ct_offset = self.ct_reg_head(feats)  # > (B, 2, 128, 128)
+        if self.with_share_convs:
+            return ct_hm, ct_offset, ct_wh, feats
         return ct_hm, ct_offset, ct_wh
 
     def get_bboxes(self,
@@ -159,7 +181,7 @@ class CenterHead(CornerHead):
             """
             [IN] bbox_head() -> (
                 preds: 
-                    bbox=(ct_hm, ct_offset, ct_wh)
+                    bbox=(ct_hm, ct_offset, ct_wh) / (ct_hm, ct_offset, ct_wh, feats) 
                 gts: (gt_bboxes, gt_masks, gt_keypoints, gt_labels)
                 metas: 
                     bbox=None
@@ -167,19 +189,29 @@ class CenterHead(CornerHead):
             [OUT] -> get_targets(gt_boxes, gt_labels, ...)
             """
             pred_outs, gt_inputs, metas = inputs
+            if self.with_share_convs:
+                share_feats = pred_outs['bbox'][-1]
+                pred_outs['bbox'] = pred_outs['bbox'][:3]
+                pred_outs['mask'] = share_feats
+                pred_outs['keypoint'] = share_feats
             gt_boxes, gt_labels = gt_inputs[0], gt_inputs[3]
             return gt_boxes, gt_labels
         else:
             """
             [IN] bbox_head() -> (
                 preds: 
-                    bbox=(ct_hm, ct_offset, ct_wh)
+                    bbox=(ct_hm, ct_offset, ct_wh) / (ct_hm, ct_offset, ct_wh, feats) 
                 metas:
                     bbox=(scores, feat_bboxes, ct_inds, ct_xs, ct_ys)
             )
             [OUT] -> get_bboxes(ct_hm, ct_offset, ct_wh, ...)
             """
             pred_outs = inputs[0]
+            if self.with_share_convs:
+                share_feats = pred_outs['bbox'][-1]
+                pred_outs['bbox'] = pred_outs['bbox'][:3]
+                pred_outs['mask'] = share_feats
+                pred_outs['keypoint'] = share_feats
             return pred_outs['bbox']
 
     def postprocess(self, *inputs, training=False):
@@ -364,6 +396,7 @@ class CenterPoseHead(CornerHead):
                  max_objs=128,
                  loss_joint=None,
                  with_limbs=False,
+                 with_share_convs=False,
                  **kwargs):
         self.stacked_convs = stacked_convs
         self.feat_channels = feat_channels
@@ -374,30 +407,22 @@ class CenterPoseHead(CornerHead):
                       [5, 11], [6, 12], [11, 12],
                       [11, 13], [13, 15], [12, 14], [14, 16]]
         self.with_limbs = with_limbs
+        self.with_share_convs = with_share_convs
         super(CenterPoseHead, self).__init__(*args, **kwargs)
         self.loss_joint = build_loss(loss_joint)
         self.loss_embedding = None
         self.fp16_enabled = False
 
-    def build_head(self, in_channel, feat_channel, stacked_convs, out_channel):
-        head_convs = [ConvModule(
-            in_channel, feat_channel, 3,
-            padding=1, bias=True, act_cfg=dict(type='ReLU', inplace=True))]
-        for i in range(1, stacked_convs):
-            head_convs.append(ConvModule(
-                feat_channel, feat_channel, 3,
-                padding=1, bias=True, act_cfg=dict(type='ReLU', inplace=True)))
-
-        head_convs.append(nn.Conv2d(feat_channel, out_channel, 1))
-        return nn.Sequential(*head_convs)
-
     def _init_layers(self):
-        self.kp_hm_head = self.build_head(
-            self.in_channels, self.feat_channels, self.stacked_convs, self.num_classes)
-        self.kp_reg_head = self.build_head(
-            self.in_channels, self.feat_channels, self.stacked_convs, 2)
-        self.ct_kp_reg_head = self.build_head(
-            self.in_channels, self.feat_channels, self.stacked_convs, self.num_classes * 2)
+        feat_channels = self.feat_channels
+        stacked_convs = self.stacked_convs
+        head_in_channel = feat_channels if self.with_share_convs else self.in_channels
+        self.kp_hm_head = build_head(
+            head_in_channel, feat_channels, stacked_convs, self.num_classes)
+        self.kp_reg_head = build_head(
+            head_in_channel, feat_channels, stacked_convs, 2)
+        self.ct_kp_reg_head = build_head(
+            head_in_channel, feat_channels, stacked_convs, self.num_classes * 2)
 
     def init_weights(self):
         bias_cls = bias_init_with_prob(0.1)
@@ -454,7 +479,7 @@ class CenterPoseHead(CornerHead):
 
         kps = (1 - mask) * kp_det_kps + mask * ct_det_kps
         kps = kps.permute(0, 2, 1, 3).contiguous()  # (B, #kps, K, 2) -> (B, K, #kps, 2)
-        kp_scores = kp_scores.permute(0, 2, 1, 3).int()  # (B, K, #kps, 1)
+        kp_scores = kp_scores.permute(0, 2, 1, 3)  # (B, K, #kps, 1)
         return kps, kp_scores
 
     def get_keypoints(self,
@@ -543,6 +568,28 @@ class CenterPoseHead(CornerHead):
         topk_xs = (topk_inds % width).float()  # (B, #cls, topk)
 
         return topk_scores, topk_inds, topk_ys, topk_xs
+
+    def preprocess(self, *inputs, training=False):
+        if not self.with_share_convs:
+            return inputs
+        feats, preds = inputs
+        """
+        [IN] -> (
+            x: backbone features
+            preds: 
+                bbox=(ct_hm, ct_offset, ct_wh)
+                mask=(share_feats,)
+        ) -> (
+            share_feats,
+            bbox=(ct_hm, ct_offset, ct_wh)
+        )
+        [OUT] -> mask_head(share_feats)
+        """
+        if not self.with_share_convs:
+            return inputs
+        feats = preds['keypoint']
+        preds['keypoint'] = None
+        return feats, preds
 
     def interprocess(self, *inputs, training=False):
         if training:
@@ -829,10 +876,11 @@ class CenterMaskHead(CornerHead):
                  resize_method='bilinear',
                  rescale_ratio=1.0,
                  weight_init='xavier',
-                 crop_upsample_cfg=dict(
+                 upsample_cfg=dict(
                      type='bilinear',
                      scale_factor=1.0,
                  ),
+                 with_share_convs=False,
                  loss_mask=None,
                  **kwargs):
         self.stacked_convs = stacked_convs
@@ -844,71 +892,66 @@ class CenterMaskHead(CornerHead):
         self.resize_method = resize_method
         self.rescale_ratio = rescale_ratio
         self.weight_init = weight_init
+        self.with_share_convs = with_share_convs
+        self.with_upsample = upsample_cfg is not None
+        self.upsample_cfg = upsample_cfg
         super(CenterMaskHead, self).__init__(*args, **kwargs)
         self.loss_mask = build_loss(loss_mask)
         self.loss_embedding = None
         self.fp16_enabled = False
-        self.crop_upsample_mod = self.build_upsample(max_objs, crop_upsample_cfg)
-
-    def build_head(self, in_channel, feat_channel, stacked_convs, out_channel):
-        head_convs = [ConvModule(
-            in_channel, feat_channel, 3,
-            padding=1, bias=True, act_cfg=dict(type='ReLU', inplace=True))]
-        for i in range(1, stacked_convs):
-            head_convs.append(ConvModule(
-                feat_channel, feat_channel, 3,
-                padding=1, bias=True, act_cfg=dict(type='ReLU', inplace=True)))
-
-        head_convs.append(nn.Conv2d(feat_channel, out_channel, 1))
-        return nn.Sequential(*head_convs)
 
     def build_upsample(self, feat_channel, upsample_cfg):
-        self.with_crop_target = upsample_cfg is not None
-        self.crop_upsample = upsample_cfg.get('type')
-        assert self.crop_upsample in [
+        _upsample = upsample_cfg.get('type')
+        assert _upsample in [
             'nearest', 'bilinear', 'deconv', 'pixel_shuffle', 'carafe', None
         ]
-        if self.crop_upsample in ['deconv', 'pixel_shuffle']:
+        if _upsample in ['deconv', 'pixel_shuffle']:
             assert hasattr(
                 upsample_cfg,
                 'upsample_kernel') and upsample_cfg.upsample_kernel > 0
-            self.crop_upsample_kernel = upsample_cfg.pop('upsample_kernel')
+            upsample_kernel = upsample_cfg.pop('upsample_kernel')
         upsample_cfg_ = upsample_cfg.copy()
-        if self.crop_upsample == 'deconv':
+        if _upsample == 'deconv':
             upsample_cfg_.update(
                 in_channels=feat_channel,
                 out_channels=feat_channel,
-                kernel_size=self.upsample_kernel,
+                kernel_size=upsample_kernel,
                 stride=2,
-                padding=(self.upsample_kernel - 1) // 2,
-                output_padding=(self.upsample_kernel - 1) // 2)
-        elif self.crop_upsample == 'pixel_shuffle':
+                padding=(upsample_kernel - 1) // 2,
+                output_padding=(upsample_kernel - 1) // 2)
+        elif _upsample == 'pixel_shuffle':
             upsample_cfg_.update(
                 in_channels=feat_channel,
                 out_channels=feat_channel,
-                # scale_factor=2,
-                upsample_kernel=self.upsample_kernel)
-        elif self.crop_upsample == 'carafe':
+                upsample_kernel=upsample_kernel)
+        elif _upsample == 'carafe':
             upsample_cfg_.update(channels=feat_channel)
         else:
             # suppress warnings
             align_corners = (None
-                             if self.crop_upsample == 'nearest' else False)
+                             if _upsample == 'nearest' else False)
             upsample_cfg_.update(
-                # scale_factor=2,
-                mode=self.crop_upsample,
+                mode=_upsample,
                 align_corners=align_corners)
         return build_upsample_layer(upsample_cfg_)
 
     def _init_layers(self):
-        self.saliency_head = self.build_head(
-            self.in_channels, self.feat_channels, self.stacked_convs, self.saliency_channels)
-        self.shape_head = self.build_head(
-            self.in_channels, self.feat_channels, self.stacked_convs, self.shape_channels)
+        feat_channels = self.feat_channels
+        stacked_convs = self.stacked_convs
+        head_in_channel = feat_channels if self.with_share_convs else self.in_channels
+        self.saliency_head = build_head(
+            head_in_channel, feat_channels, stacked_convs, self.saliency_channels)
+        self.shape_head = build_head(
+            head_in_channel, feat_channels, stacked_convs, self.shape_channels)
+        if self.with_upsample:
+            self.salient_upsample = self.build_upsample(self.saliency_channels, self.upsample_cfg)
 
     def init_weights(self):
         self._init_head_weights(self.saliency_head)
         self._init_head_weights(self.shape_head)
+        for m in self.modules():
+            if isinstance(m, CARAFEPack):
+                m.init_weights()
 
     def _init_head_weights(self, layer):
         for _, m in layer.named_modules():
@@ -919,13 +962,12 @@ class CenterMaskHead(CornerHead):
                     normal_init(m, std=0.001)
                 else:
                     raise NotImplementedError
-        for m in self.modules():
-            if isinstance(m, CARAFEPack):
-                m.init_weights()
 
     def forward(self, x):  # `feat_h/feat_w`: 128, `S`: 32
         global_saliency = self.saliency_head(x)  # (B, 1, feat_h, feat_w)
         local_shape = self.shape_head(x)  # (B, SxS, feat_h, feat_w)
+        if self.with_upsample:
+            global_saliency = self.salient_upsample(global_saliency)
         return global_saliency.sigmoid(), local_shape.sigmoid()
 
     def get_segm_masks(self,
@@ -943,8 +985,6 @@ class CenterMaskHead(CornerHead):
 
         ct_shape = self._transpose_and_gather_feat(ct_shape, ct_inds)  # (B, SxS, H, W) -> (B, K, SxS)
         ct_shape = ct_shape.view(batch, num_topk, self.shape_dim, self.shape_dim)  # (B, K, S, S)
-        if self.with_crop_target:
-            ct_shape = self.crop_upsample_mod(ct_shape)
 
         result_list = []
         for img_id in range(len(img_metas)):  # > #img
@@ -1001,13 +1041,35 @@ class CenterMaskHead(CornerHead):
             cls_segms[l].append(m)
         return cls_segms
 
+    def preprocess(self, *inputs, training=False):
+        if not self.with_share_convs:
+            return inputs
+        feats, preds = inputs
+        """
+        [IN] -> (
+            x: backbone features
+            preds: 
+                bbox=(ct_hm, ct_offset, ct_wh)
+                mask=(share_feats,)
+        ) -> (
+            share_feats,
+            bbox=(ct_hm, ct_offset, ct_wh)
+        )
+        [OUT] -> mask_head(share_feats)
+        """
+        if not self.with_share_convs:
+            return inputs
+        feats = preds['mask']
+        preds['mask'] = None
+        return feats, preds
+
     def interprocess(self, *inputs, training=False):
         if training:
-            # `TRAIN`
+            # `TRAIN`: `with_share_convs` is enabled
             """
             [IN] mask_head() -> (
                 preds:
-                    bbox=(ct_hm, ct_offset, ct_wh)
+                    bbox=(ct_hm, ct_offset, ct_wh, share_feats)
                     mask=(ct_saliency, ct_shape)
                 gts: (gt_bboxes, gt_masks, gt_keypoints, gt_labels)
                 metas: 
@@ -1030,7 +1092,7 @@ class CenterMaskHead(CornerHead):
             """
             [IN] mask_head() -> (
                 preds:
-                    bbox=(ct_hm, ct_offset, ct_wh)
+                    bbox=(ct_hm, ct_offset, ct_wh, share_feats)
                     mask=(ct_saliency, ct_shape)
                 metas:
                     bbox=(scores, feat_bboxes, ct_inds, ct_xs, ct_ys, ct_wh)
@@ -1055,7 +1117,7 @@ class CenterMaskHead(CornerHead):
             """
             [IN] get_targets() -> (
                 preds:
-                    bbox=(ct_hm, ct_offset, ct_wh)
+                    bbox=(ct_hm, ct_offset, ct_wh, share_feats)
                     mask=(ct_saliency, ct_shape)
                 targets:
                     bbox=(hm_target, offset_target, wh_target, ct_target_mask, ct_ind_target)
@@ -1083,7 +1145,7 @@ class CenterMaskHead(CornerHead):
             """
             [IN] get_segm_masks() -> (
                 preds:
-                    bbox=(ct_hm, ct_offset, ct_wh)
+                    bbox=(ct_hm, ct_offset, ct_wh, share_feats)
                     mask=(ct_saliency, ct_shape)
                 metas: 
                     bbox=(clses, scores, bboxes, ct_inds, ct_xs, ct_ys, ct_wh)
@@ -1171,10 +1233,13 @@ class CenterMaskHead(CornerHead):
         feat_h, feat_w = ct_saliency.size()[1:]
         if training and num_obj == 0:
             return ct_saliency.new_zeros((1, feat_h, feat_w), dtype=torch.float32)
+        if self.with_upsample:
+            crop_boxes = crop_boxes * self.upsample_cfg.get('scale_factor', 2.0)
+        # cropping salient maps by bboxes
         crop_masks = self._crop_masks(ct_saliency, crop_boxes, padding=0)
         crop_salient_maps = ct_saliency.expand(num_obj, feat_h, feat_w) * crop_masks.float()
         crop_boxes = self._masks2bboxes(crop_masks, padding=1)[0].long()
-        if training and self.with_crop_target:
+        if training:
             pred_masks = []
             for obj_id in range(num_obj):
                 x1, y1, x2, y2 = crop_boxes[obj_id].tolist()
@@ -1221,8 +1286,6 @@ class CenterMaskHead(CornerHead):
         batch, max_obj = ct_ind_target.size()
         pred_ct_shape = self._transpose_and_gather_feat(pred_ct_shape, ct_ind_target)  # (B, SxS, H, W) -> (B, K, SxS)
         pred_ct_shape = pred_ct_shape.view(batch, max_obj, self.shape_dim, self.shape_dim)
-        if self.with_crop_target:
-            pred_ct_shape = self.crop_upsample_mod(pred_ct_shape)
 
         loss_mask, num_objs = 0, 0
         for img_id, ct_saliency, ct_shape, box_target, mask_target in \
@@ -1233,12 +1296,9 @@ class CenterMaskHead(CornerHead):
             if num_obj == 0:
                 loss_mask += pred_masks.sum() * 0.
             else:
-                if self.with_crop_target:
-                    for obj_id in range(num_obj):
-                        if mask_target[obj_id].max().item() != 0:
-                            loss_mask += self.loss_mask(pred_masks[obj_id], mask_target[obj_id])
-                else:
-                    loss_mask += self.loss_mask(pred_masks, mask_target)
+                for obj_id in range(num_obj):
+                    if mask_target[obj_id].max().item() != 0:
+                        loss_mask += self.loss_mask(pred_masks[obj_id], mask_target[obj_id])
             num_objs += num_obj
         loss_mask /= (num_objs + eps)
         return {'mask/loss_mask': loss_mask}
@@ -1295,24 +1355,21 @@ class CenterMaskHead(CornerHead):
         feat_bboxes_target[:, 1::2] = torch.clamp(feat_bboxes_target[:, 1::2], max=feat_shape[0])
         feat_bboxes_target = feat_bboxes_target.long()
 
-        if not self.with_crop_target:
-            masks_target, feat_masks_target = [], []
-            for obj_id, bbox, feat_bbox, feat_mask in \
-                    zip(range(num_obj), bboxes_target, feat_bboxes_target, feat_gt_masks):  # > #obj
-                # NOTE: [1] use `gt_masks` to get `bboxes` and then downsize to get `feat_bboxes`
-                x1, y1, x2, y2 = bbox.tolist()
-                box_w, box_h = max(x2 - x1, 1), max(y2 - y1, 1)
-                crop_mask = feat_mask[y1:y1+box_h, x1:x1+box_w]  # (crop_h, crop_w)
-                masks_target.append(crop_mask.float())
+        masks_target, feat_masks_target = [], []
+        for obj_id, bbox, feat_bbox, feat_mask in \
+                zip(range(num_obj), bboxes_target, feat_bboxes_target, feat_gt_masks):  # > #obj
+            # NOTE: [1] use `gt_masks` to get `bboxes` and then downsize to get `feat_bboxes`
+            x1, y1, x2, y2 = bbox.tolist()
+            box_w, box_h = max(x2 - x1, 1), max(y2 - y1, 1)
+            crop_mask = feat_mask[y1:y1+box_h, x1:x1+box_w]  # (crop_h, crop_w)
+            masks_target.append(crop_mask.float())
 
-                # NOTE: [2] use `feat_gt_masks` to get `feat_bboxes`
-                x1, y1, x2, y2 = feat_bbox.tolist()
-                box_w, box_h = max(x2 - x1, 1), max(y2 - y1, 1)
-                crop_mask = feat_mask[y1:y1+box_h, x1:x1+box_w]  # (crop_h, crop_w)
-                feat_masks_target.append(crop_mask.float())
-            masks_target = feat_masks_target
-        else:
-            masks_target = feat_gt_masks.float()
+            # NOTE: [2] use `feat_gt_masks` to get `feat_bboxes`
+            x1, y1, x2, y2 = feat_bbox.tolist()
+            box_w, box_h = max(x2 - x1, 1), max(y2 - y1, 1)
+            crop_mask = feat_mask[y1:y1+box_h, x1:x1+box_w]  # (crop_h, crop_w)
+            feat_masks_target.append(crop_mask.float())
+        masks_target = feat_masks_target
         bboxes_target = feat_bboxes_target
         return bboxes_target, masks_target
 
