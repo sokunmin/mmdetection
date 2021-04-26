@@ -84,7 +84,7 @@ class CenterHead(CornerHead):
             if isinstance(m, nn.Conv2d):
                 normal_init(m, std=0.001)
 
-    def forward(self, x):
+    def forward(self, feats):
         """
         Args:
             feats: list(tensor).
@@ -92,7 +92,6 @@ class CenterHead(CornerHead):
             hm: tensor, (batch, 80, h, w).
             wh: tensor, (batch, 4, h, w) or (batch, 80 * 4, h, w).
         """
-        feats = x
         if self.with_share_convs:
             feats = self.share_convs(feats)
         ct_hm = self.ct_hm_head(feats)  # > (B, #cls, 128, 128)
@@ -578,12 +577,12 @@ class CenterPoseHead(CornerHead):
             x: backbone features
             preds: 
                 bbox=(ct_hm, ct_offset, ct_wh)
-                mask=(share_feats,)
+                keypoint=(share_feats,)
         ) -> (
             share_feats,
             bbox=(ct_hm, ct_offset, ct_wh)
         )
-        [OUT] -> mask_head(share_feats)
+        [OUT] -> keypoint_head(share_feats)
         """
         if not self.with_share_convs:
             return inputs
@@ -968,7 +967,7 @@ class CenterMaskHead(CornerHead):
         local_shape = self.shape_head(x)  # (B, SxS, feat_h, feat_w)
         if self.with_upsample:
             global_saliency = self.salient_upsample(global_saliency)
-        return global_saliency.sigmoid(), local_shape.sigmoid()
+        return global_saliency, local_shape
 
     def get_segm_masks(self,
                        mask_outs,
@@ -980,8 +979,8 @@ class CenterMaskHead(CornerHead):
         clses, scores, bboxes, ct_inds, ct_xs, ct_ys, ct_wh = bbox_metas
         batch, shape_dim, feat_h, feat_w = pred_ct_shape.size()
         num_topk = self.test_cfg.max_per_img
-        ct_saliency = pred_ct_saliency.detach()  # (B, 1, H, W)
-        ct_shape = pred_ct_shape.detach()  # (B, SxS, H, W)
+        ct_saliency = pred_ct_saliency.detach().sigmoid_()  # (B, 1, H, W)
+        ct_shape = pred_ct_shape.detach().sigmoid_()  # (B, SxS, H, W)
 
         ct_shape = self._transpose_and_gather_feat(ct_shape, ct_inds)  # (B, SxS, H, W) -> (B, K, SxS)
         ct_shape = ct_shape.view(batch, num_topk, self.shape_dim, self.shape_dim)  # (B, K, S, S)
@@ -1069,7 +1068,7 @@ class CenterMaskHead(CornerHead):
             """
             [IN] mask_head() -> (
                 preds:
-                    bbox=(ct_hm, ct_offset, ct_wh, share_feats)
+                    bbox=(ct_hm, ct_offset, ct_wh)
                     mask=(ct_saliency, ct_shape)
                 gts: (gt_bboxes, gt_masks, gt_keypoints, gt_labels)
                 metas: 
@@ -1092,7 +1091,7 @@ class CenterMaskHead(CornerHead):
             """
             [IN] mask_head() -> (
                 preds:
-                    bbox=(ct_hm, ct_offset, ct_wh, share_feats)
+                    bbox=(ct_hm, ct_offset, ct_wh)
                     mask=(ct_saliency, ct_shape)
                 metas:
                     bbox=(scores, feat_bboxes, ct_inds, ct_xs, ct_ys, ct_wh)
@@ -1117,7 +1116,7 @@ class CenterMaskHead(CornerHead):
             """
             [IN] get_targets() -> (
                 preds:
-                    bbox=(ct_hm, ct_offset, ct_wh, share_feats)
+                    bbox=(ct_hm, ct_offset, ct_wh)
                     mask=(ct_saliency, ct_shape)
                 targets:
                     bbox=(hm_target, offset_target, wh_target, ct_target_mask, ct_ind_target)
@@ -1145,7 +1144,7 @@ class CenterMaskHead(CornerHead):
             """
             [IN] get_segm_masks() -> (
                 preds:
-                    bbox=(ct_hm, ct_offset, ct_wh, share_feats)
+                    bbox=(ct_hm, ct_offset, ct_wh)
                     mask=(ct_saliency, ct_shape)
                 metas: 
                     bbox=(clses, scores, bboxes, ct_inds, ct_xs, ct_ys, ct_wh)
@@ -1199,7 +1198,6 @@ class CenterMaskHead(CornerHead):
             boxes: (N, (x1, y1, x2, y2))
         """
         n = masks.size(0)
-        keep = torch.zeros(n, dtype=torch.bool)
         boxes = masks.new_zeros((n, 4), dtype=torch.float32)
         for i in range(n):
             m = masks[i].bool()  # > (H, W)
@@ -1213,10 +1211,7 @@ class CenterMaskHead(CornerHead):
                 boxes[i, 1] = y1
                 boxes[i, 2] = x2 + padding
                 boxes[i, 3] = y2 + padding
-                keep[i] = True
-            else:
-                boxes[i] = masks.new_zeros(4)
-        return boxes, keep
+        return boxes
 
     def assemble_masks(self, ct_saliency, ct_shape, crop_boxes, training=False):
         """
@@ -1238,7 +1233,7 @@ class CenterMaskHead(CornerHead):
         # cropping salient maps by bboxes
         crop_masks = self._crop_masks(ct_saliency, crop_boxes, padding=0)
         crop_salient_maps = ct_saliency.expand(num_obj, feat_h, feat_w) * crop_masks.float()
-        crop_boxes = self._masks2bboxes(crop_masks, padding=1)[0].long()
+        crop_boxes = self._masks2bboxes(crop_masks, padding=1).long()
         if training:
             pred_masks = []
             for obj_id in range(num_obj):
@@ -1281,8 +1276,8 @@ class CenterMaskHead(CornerHead):
              gt_masks_ignore=None,
              gt_keypoints_ignore=None):
         eps = 1e-12
-        pred_ct_saliency = torch.clamp(pred_ct_saliency, min=eps, max=1 - eps)
-        pred_ct_shape = torch.clamp(pred_ct_shape, min=eps, max=1 - eps)
+        pred_ct_saliency = torch.clamp(pred_ct_saliency.sigmoid_(), min=eps, max=1 - eps)
+        pred_ct_shape = torch.clamp(pred_ct_shape.sigmoid_(), min=eps, max=1 - eps)
         batch, max_obj = ct_ind_target.size()
         pred_ct_shape = self._transpose_and_gather_feat(pred_ct_shape, ct_ind_target)  # (B, SxS, H, W) -> (B, K, SxS)
         pred_ct_shape = pred_ct_shape.view(batch, max_obj, self.shape_dim, self.shape_dim)
@@ -1341,7 +1336,7 @@ class CenterMaskHead(CornerHead):
         else:
             feat_gt_masks = self._resize_masks(gt_masks, feat_shape, method=self.resize_method)
         # get bboxes from gt masks
-        bboxes_target, keep1 = self._masks2bboxes(gt_masks, padding=1)  # (#obj, 4)
+        bboxes_target = self._masks2bboxes(gt_masks, padding=1)  # (#obj, 4)
         bboxes_target[:, 0::2] = bboxes_target[:, 0::2] / width_stride
         bboxes_target[:, 1::2] = bboxes_target[:, 1::2] / height_stride
         bboxes_target[:, [0, 1]] = bboxes_target[:, [0, 1]].floor()
@@ -1350,7 +1345,7 @@ class CenterMaskHead(CornerHead):
         bboxes_target[:, [1, 3]] = torch.clamp(bboxes_target[:, [1, 3]], min=0, max=feat_shape[0])
         bboxes_target = bboxes_target.long()
 
-        feat_bboxes_target, keep2 = self._masks2bboxes(feat_gt_masks, padding=1)  # (#obj, 4)
+        feat_bboxes_target = self._masks2bboxes(feat_gt_masks, padding=1)  # (#obj, 4)
         feat_bboxes_target[:, 0::2] = torch.clamp(feat_bboxes_target[:, 0::2], max=feat_shape[1])
         feat_bboxes_target[:, 1::2] = torch.clamp(feat_bboxes_target[:, 1::2], max=feat_shape[0])
         feat_bboxes_target = feat_bboxes_target.long()

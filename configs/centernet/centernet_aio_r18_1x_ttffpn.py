@@ -118,10 +118,9 @@ test_pipeline = [
                            'scale_factor', 'flip', 'img_norm_cfg')),
         ])
 ]
-
 classes = ('person',)
 data = dict(
-    samples_per_gpu=16,
+    samples_per_gpu=32,
     workers_per_gpu=2,
     train=dict(
         type=dataset_type,
@@ -150,11 +149,11 @@ lr_config = dict(
     warmup='linear',
     warmup_iters=1000,
     warmup_ratio=1.0 / 5,
-    step=[32])
+    step=[120])
 checkpoint_config = dict(interval=5)
 evaluation = dict(interval=1, metric=['bbox', 'segm', 'keypoint'], multitask=True)
 # runtime settings
-total_epochs = 35
+total_epochs = 130
 cudnn_benchmark = True
 find_unused_parameters = True
 
