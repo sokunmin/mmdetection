@@ -14,7 +14,6 @@ class BaseDenseHead(nn.Module, metaclass=ABCMeta):
         """Compute losses of the head."""
         pass
 
-    @abstractmethod
     def get_bboxes(self, **kwargs):
         """Transform network output for a batch into bbox predictions."""
         pass

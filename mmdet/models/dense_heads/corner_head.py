@@ -1,3 +1,4 @@
+from abc import abstractmethod
 from math import ceil, log
 
 import torch
@@ -71,9 +72,147 @@ class BiCornerPool(nn.Module):
         conv2 = self.conv2(relu)
         return conv2
 
+USE_MMDET_OFFICIAL = False
+
+class CornerBaseHead(BaseDenseHead):
+    """Base class for DenseHeads."""
+
+    def __init__(self,
+                 num_classes,
+                 in_channels,
+                 train_cfg=None,
+                 test_cfg=None):
+        super(CornerBaseHead, self).__init__()
+        self.num_classes = num_classes
+        self.in_channels = in_channels
+        self.train_cfg = train_cfg
+        self.test_cfg = test_cfg
+        self._init_layers()
+
+    @abstractmethod
+    def _init_layers(self):
+        pass
+
+    def build_convs(self, in_channel, feat_channel, stacked_convs):
+        head_convs = []
+        for i in range(stacked_convs):
+            chn = in_channel if i == 0 else feat_channel
+            head_convs.append(ConvModule(
+                chn, feat_channel, 3,
+                padding=1, bias=True, act_cfg=dict(type='ReLU', inplace=True)))
+        return head_convs
+
+    def build_share_convs(self, in_channel, feat_channel, stacked_convs):
+        if stacked_convs == 0:
+            return nn.Identity()
+        return nn.Sequential(*self.build_convs(in_channel, feat_channel, stacked_convs))
+
+    def build_head(self, in_channel, feat_channel, stacked_convs, out_channel):
+        head_convs = self.build_convs(in_channel, feat_channel, stacked_convs)
+        head_convs.append(nn.Conv2d(feat_channel, out_channel, 1))
+        return nn.Sequential(*head_convs)
+
+    def _gather_feat(self, feat, ind, mask=None):
+        """Gather feature according to index.
+
+        Args:
+            feat (Tensor): Target feature map.
+            ind (Tensor): Target coord index.
+            mask (Tensor | None): Mask of featuremap. Default: None.
+
+        Returns:
+            feat (Tensor): Gathered feature.
+        """
+        dim = feat.size(2)
+        if USE_MMDET_OFFICIAL:
+            # [old]
+            ind = ind.unsqueeze(2).repeat(1, 1, dim)
+        else:
+            # [new]
+            ind = ind.unsqueeze(len(ind.shape)).expand(*ind.shape, dim)
+        feat = feat.gather(1, ind)
+        if mask is not None:
+            mask = mask.unsqueeze(2).expand_as(feat)
+            feat = feat[mask]
+            feat = feat.view(-1, dim)
+        return feat
+
+    def _local_maximum(self, heat, kernel=3):
+        """Extract local maximum pixel with given kernal.
+
+        Args:
+            heat (Tensor): Target heatmap.
+            kernel (int): Kernel size of max pooling. Default: 3.
+
+        Returns:
+            heat (Tensor): A heatmap where local maximum pixels maintain its
+                own value and other positions are 0.
+        """
+        pad = (kernel - 1) // 2
+        hmax = F.max_pool2d(heat, kernel, stride=1, padding=pad)
+        keep = (hmax == heat).float()
+        return heat * keep
+
+    def _transpose_and_gather_feat(self, feat, ind):
+        """Transpose and gather feature according to index.
+
+        Args:
+            feat (Tensor): Target feature map.
+            ind (Tensor): Target coord index.
+
+        Returns:
+            feat (Tensor): Transposed and gathered feature.
+        """
+        feat = feat.permute(0, 2, 3, 1).contiguous()
+        feat = feat.view(feat.size(0), -1, feat.size(3))
+        feat = self._gather_feat(feat, ind)
+        return feat
+
+    def _topk(self, scores, k=20):
+        """Get top k positions from heatmap.
+
+        Args:
+            scores (Tensor): Target heatmap with shape
+                [batch, num_classes, height, width].
+            k (int): Target number. Default: 20.
+
+        Returns:
+            tuple[torch.Tensor]: Scores, indexes, categories and coords of
+                topk keypoint. Containing following Tensors:
+
+            - topk_scores (Tensor): Max scores of each topk keypoint.
+            - topk_inds (Tensor): Indexes of each topk keypoint.
+            - topk_clses (Tensor): Categories of each topk keypoint.
+            - topk_ys (Tensor): Y-coord of each topk keypoint.
+            - topk_xs (Tensor): X-coord of each topk keypoint.
+        """
+        # [old]
+        if USE_MMDET_OFFICIAL:
+            batch, _, height, width = scores.size()
+            topk_scores, topk_inds = torch.topk(scores.view(batch, -1), k)
+            topk_clses = topk_inds // (height * width)
+            topk_inds = topk_inds % (height * width)
+            topk_ys = topk_inds // width
+            topk_xs = (topk_inds % width).int().float()
+        else:
+            # [new]
+            batch, channel, height, width = scores.size()
+            topk_scores, topk_inds = torch.topk(scores.view(batch, channel, -1), k)
+
+            topk_inds = topk_inds % (height * width)  # (B, #cls, K)
+            topk_ys = (topk_inds // width).float()  # (B, #cls, K)
+            topk_xs = (topk_inds % width).float()  # (B, #cls, K)
+
+            topk_scores, topk_ind = torch.topk(topk_scores.view(batch, -1), k)
+            topk_clses = topk_ind // k
+            topk_inds = self._gather_feat(topk_inds.view(batch, -1, 1), topk_ind).view(batch, k)
+            topk_ys = self._gather_feat(topk_ys.view(batch, -1, 1), topk_ind).view(batch, k)
+            topk_xs = self._gather_feat(topk_xs.view(batch, -1, 1), topk_ind).view(batch, k)
+        return topk_scores, topk_inds, topk_clses, topk_ys, topk_xs
+
 
 @HEADS.register_module()
-class CornerHead(BaseDenseHead):
+class CornerHead(CornerBaseHead):
     """Head of CornerNet: Detecting Objects as Paired Keypoints.
 
     Code is modified from the `official github repo
@@ -105,12 +244,9 @@ class CornerHead(BaseDenseHead):
     """
 
     def __init__(self,
-                 num_classes,
-                 in_channels,
+                 *args,
                  num_feat_levels=2,
                  corner_emb_channels=1,
-                 train_cfg=None,
-                 test_cfg=None,
                  loss_heatmap=dict(
                      type='GaussianFocalLoss',
                      alpha=2.0,
@@ -121,24 +257,19 @@ class CornerHead(BaseDenseHead):
                      pull_weight=0.25,
                      push_weight=0.25),
                  loss_offset=dict(
-                     type='SmoothL1Loss', beta=1.0, loss_weight=1)):
-        super(CornerHead, self).__init__()
-        self.num_classes = num_classes
-        self.in_channels = in_channels
+                     type='SmoothL1Loss', beta=1.0, loss_weight=1),
+                 **kwargs):
         self.corner_emb_channels = corner_emb_channels
         self.with_corner_emb = self.corner_emb_channels > 0
         self.corner_offset_channels = 2
         self.num_feat_levels = num_feat_levels
+        super(CornerHead, self).__init__(*args, **kwargs)
         self.loss_heatmap = build_loss(
             loss_heatmap) if loss_heatmap is not None else None
         self.loss_embedding = build_loss(
             loss_embedding) if loss_embedding is not None else None
         self.loss_offset = build_loss(
             loss_offset) if loss_offset is not None else None
-        self.train_cfg = train_cfg
-        self.test_cfg = test_cfg
-
-        self._init_layers()
 
     def _make_layers(self, out_channels, in_channels=256, feat_channels=256):
         """Initialize conv sequential for CornerHead."""
@@ -773,83 +904,6 @@ class CornerHead(BaseDenseHead):
             out_labels = out_labels[idx]
 
         return out_bboxes, out_labels
-
-    def _gather_feat(self, feat, ind, mask=None):
-        """Gather feature according to index.
-
-        Args:
-            feat (Tensor): Target feature map.
-            ind (Tensor): Target coord index.
-            mask (Tensor | None): Mask of featuremap. Default: None.
-
-        Returns:
-            feat (Tensor): Gathered feature.
-        """
-        dim = feat.size(2)
-        ind = ind.unsqueeze(2).repeat(1, 1, dim)
-        feat = feat.gather(1, ind)
-        if mask is not None:
-            mask = mask.unsqueeze(2).expand_as(feat)
-            feat = feat[mask]
-            feat = feat.view(-1, dim)
-        return feat
-
-    def _local_maximum(self, heat, kernel=3):
-        """Extract local maximum pixel with given kernal.
-
-        Args:
-            heat (Tensor): Target heatmap.
-            kernel (int): Kernel size of max pooling. Default: 3.
-
-        Returns:
-            heat (Tensor): A heatmap where local maximum pixels maintain its
-                own value and other positions are 0.
-        """
-        pad = (kernel - 1) // 2
-        hmax = F.max_pool2d(heat, kernel, stride=1, padding=pad)
-        keep = (hmax == heat).float()
-        return heat * keep
-
-    def _transpose_and_gather_feat(self, feat, ind):
-        """Transpose and gather feature according to index.
-
-        Args:
-            feat (Tensor): Target feature map.
-            ind (Tensor): Target coord index.
-
-        Returns:
-            feat (Tensor): Transposed and gathered feature.
-        """
-        feat = feat.permute(0, 2, 3, 1).contiguous()
-        feat = feat.view(feat.size(0), -1, feat.size(3))
-        feat = self._gather_feat(feat, ind)
-        return feat
-
-    def _topk(self, scores, k=20):
-        """Get top k positions from heatmap.
-
-        Args:
-            scores (Tensor): Target heatmap with shape
-                [batch, num_classes, height, width].
-            k (int): Target number. Default: 20.
-
-        Returns:
-            tuple[torch.Tensor]: Scores, indexes, categories and coords of
-                topk keypoint. Containing following Tensors:
-
-            - topk_scores (Tensor): Max scores of each topk keypoint.
-            - topk_inds (Tensor): Indexes of each topk keypoint.
-            - topk_clses (Tensor): Categories of each topk keypoint.
-            - topk_ys (Tensor): Y-coord of each topk keypoint.
-            - topk_xs (Tensor): X-coord of each topk keypoint.
-        """
-        batch, _, height, width = scores.size()
-        topk_scores, topk_inds = torch.topk(scores.view(batch, -1), k)
-        topk_clses = topk_inds // (height * width)
-        topk_inds = topk_inds % (height * width)
-        topk_ys = topk_inds // width
-        topk_xs = (topk_inds % width).int().float()
-        return topk_scores, topk_inds, topk_clses, topk_ys, topk_xs
 
     def decode_heatmap(self,
                        tl_heat,

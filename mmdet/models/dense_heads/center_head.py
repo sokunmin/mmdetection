@@ -9,42 +9,28 @@ from mmcv.runner import force_fp32
 from mmcv.ops.carafe import CARAFEPack
 
 from mmdet.core import multi_apply
-from .corner_head import CornerHead
+from .corner_head import CornerBaseHead
 from ..builder import HEADS, build_loss
 from ..utils import gaussian_radius, gen_gaussian_target
 
 
-def build_convs(in_channel, feat_channel, stacked_convs):
-    head_convs = []
-    for i in range(stacked_convs):
-        chn = in_channel if i == 0 else feat_channel
-        head_convs.append(ConvModule(
-            chn, feat_channel, 3,
-            padding=1, bias=True, act_cfg=dict(type='ReLU', inplace=True)))
-    return head_convs
-
-
-def build_share_convs(in_channel, feat_channel, stacked_convs):
-    if stacked_convs == 0:
-        return nn.Identity()
-    return nn.Sequential(*build_convs(in_channel, feat_channel, stacked_convs))
-
-
-def build_head(in_channel, feat_channel, stacked_convs, out_channel):
-    head_convs = build_convs(in_channel, feat_channel, stacked_convs)
-    head_convs.append(nn.Conv2d(feat_channel, out_channel, 1))
-    return nn.Sequential(*head_convs)
-
-
 @HEADS.register_module
-class CenterHead(CornerHead):
+class CenterHead(CornerBaseHead):
     def __init__(self,
                  *args,
                  stacked_convs=1,
                  share_stacked_convs=0,
                  feat_channels=256,
                  max_objs=128,
-                 loss_bbox=dict(type='L1Loss', loss_weight=0.1),
+                 loss_heatmap=dict(
+                     type='GaussianFocalLoss',
+                     alpha=2.0,
+                     gamma=4.0,
+                     loss_weight=1),
+                 loss_bbox=dict(
+                     type='L1Loss', loss_weight=0.1),
+                 loss_offset=dict(
+                     type='L1Loss', loss_weight=1.0),
                  **kwargs):
         self.stacked_convs = stacked_convs
         self.feat_channels = feat_channels
@@ -52,21 +38,25 @@ class CenterHead(CornerHead):
         self.share_stacked_convs = share_stacked_convs
         self.with_share_convs = share_stacked_convs > 0
         super(CenterHead, self).__init__(*args, **kwargs)
-        self.loss_bbox = build_loss(loss_bbox)
-        self.loss_embedding = None
+        self.loss_heatmap = build_loss(
+            loss_heatmap) if loss_heatmap is not None else None
+        self.loss_bbox = build_loss(
+            loss_bbox) if loss_bbox is not None else None
+        self.loss_offset = build_loss(
+            loss_offset) if loss_offset is not None else None
         self.fp16_enabled = False
 
     def _init_layers(self):
         feat_channels = self.feat_channels
         stacked_convs = self.stacked_convs
         head_in_channel = feat_channels if self.with_share_convs else self.in_channels
-        self.share_convs = build_share_convs(
+        self.share_convs = self.build_share_convs(
             self.in_channels, feat_channels, self.share_stacked_convs)
-        self.ct_hm_head = build_head(
+        self.ct_hm_head = self.build_head(
             head_in_channel, feat_channels, stacked_convs, self.num_classes)
-        self.ct_wh_head = build_head(
+        self.ct_wh_head = self.build_head(
             head_in_channel, feat_channels, stacked_convs, 2)
-        self.ct_reg_head = build_head(
+        self.ct_reg_head = self.build_head(
             head_in_channel, feat_channels, stacked_convs, 2)
 
     def init_weights(self):
@@ -386,14 +376,22 @@ class CenterHead(CornerHead):
 
 
 @HEADS.register_module()
-class CenterPoseHead(CornerHead):
+class CenterPoseHead(CornerBaseHead):
 
     def __init__(self,
                  *args,
                  stacked_convs=1,
                  feat_channels=256,
                  max_objs=128,
-                 loss_joint=None,
+                 loss_heatmap=dict(
+                     type='GaussianFocalLoss',
+                     alpha=2.0,
+                     gamma=4.0,
+                     loss_weight=1),
+                 loss_offset=dict(
+                     type='L1Loss', loss_weight=1.0),
+                 loss_joint=dict(
+                     type='L1Loss', loss_weight=1.0),
                  with_limbs=False,
                  with_share_convs=False,
                  **kwargs):
@@ -408,19 +406,23 @@ class CenterPoseHead(CornerHead):
         self.with_limbs = with_limbs
         self.with_share_convs = with_share_convs
         super(CenterPoseHead, self).__init__(*args, **kwargs)
-        self.loss_joint = build_loss(loss_joint)
-        self.loss_embedding = None
+        self.loss_heatmap = build_loss(
+            loss_heatmap) if loss_heatmap is not None else None
+        self.loss_offset = build_loss(
+            loss_offset) if loss_offset is not None else None
+        self.loss_joint = build_loss(
+            loss_joint) if loss_joint is not None else None
         self.fp16_enabled = False
 
     def _init_layers(self):
         feat_channels = self.feat_channels
         stacked_convs = self.stacked_convs
         head_in_channel = feat_channels if self.with_share_convs else self.in_channels
-        self.kp_hm_head = build_head(
+        self.kp_hm_head = self.build_head(
             head_in_channel, feat_channels, stacked_convs, self.num_classes)
-        self.kp_reg_head = build_head(
+        self.kp_reg_head = self.build_head(
             head_in_channel, feat_channels, stacked_convs, 2)
-        self.ct_kp_reg_head = build_head(
+        self.ct_kp_reg_head = self.build_head(
             head_in_channel, feat_channels, stacked_convs, self.num_classes * 2)
 
     def init_weights(self):
@@ -863,7 +865,7 @@ class CenterPoseHead(CornerHead):
 
 
 @HEADS.register_module()
-class CenterMaskHead(CornerHead):
+class CenterMaskHead(CornerBaseHead):
 
     def __init__(self,
                  *args,
@@ -895,8 +897,8 @@ class CenterMaskHead(CornerHead):
         self.with_upsample = upsample_cfg is not None
         self.upsample_cfg = upsample_cfg
         super(CenterMaskHead, self).__init__(*args, **kwargs)
-        self.loss_mask = build_loss(loss_mask)
-        self.loss_embedding = None
+        self.loss_mask = build_loss(
+            loss_mask) if loss_mask is not None else None
         self.fp16_enabled = False
 
     def build_upsample(self, feat_channel, upsample_cfg):
@@ -938,9 +940,9 @@ class CenterMaskHead(CornerHead):
         feat_channels = self.feat_channels
         stacked_convs = self.stacked_convs
         head_in_channel = feat_channels if self.with_share_convs else self.in_channels
-        self.saliency_head = build_head(
+        self.saliency_head = self.build_head(
             head_in_channel, feat_channels, stacked_convs, self.saliency_channels)
-        self.shape_head = build_head(
+        self.shape_head = self.build_head(
             head_in_channel, feat_channels, stacked_convs, self.shape_channels)
         if self.with_upsample:
             self.salient_upsample = self.build_upsample(self.saliency_channels, self.upsample_cfg)
@@ -1033,8 +1035,8 @@ class CenterMaskHead(CornerHead):
         pred_masks = pred_masks[:, :img_h, :img_w]
 
         if isinstance(pred_masks, torch.Tensor):
-            pred_masks = pred_masks.cpu().numpy().astype(np.uint8)
-            pred_labels = pred_labels.squeeze().cpu().numpy().astype(np.int32)
+            pred_masks = pred_masks.detach().to(torch.uint8).cpu().numpy()
+            pred_labels = pred_labels.detach().squeeze().to(torch.int32).cpu().numpy()
 
         for m, l in zip(pred_masks, pred_labels):
             cls_segms[l].append(m)

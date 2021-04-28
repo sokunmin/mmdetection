@@ -25,8 +25,6 @@ model = dict(
         num_classes=1,
         in_channels=64,
         feat_channels=256,
-        num_feat_levels=1,
-        corner_emb_channels=0,
         loss_heatmap=dict(
             type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1),
         loss_offset=dict(type='L1Loss', loss_weight=1.0),
@@ -36,7 +34,6 @@ model = dict(
         num_classes=17,
         in_channels=64,
         feat_channels=256,
-        num_feat_levels=1,
         loss_heatmap=dict(
             type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1),
         loss_offset=dict(type='L1Loss', loss_weight=1.0),
@@ -53,7 +50,8 @@ test_cfg = dict(
     max_per_img=100)
 # dataset settings, SEE: Normalize RGB https://aishack.in/tutorials/normalized-rgb/
 img_norm_cfg = dict(
-    mean=[0.408, 0.447, 0.470], std=[0.289, 0.274, 0.278], to_rgb=False)
+    # NOTE: add `norm_rgb=True` if eval offical pretrained weights
+    mean=[0.408, 0.447, 0.470], std=[0.289, 0.274, 0.278], to_rgb=False, norm_rgb=True)
     # mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], to_rgb=False, norm_rgb=True)
     # mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=False, norm_rgb=True)
 train_pipeline = [
@@ -61,35 +59,26 @@ train_pipeline = [
     dict(type='LoadAnnotations',
          with_bbox=True,
          with_mask=True,
-         with_keypoint=True,
-         with_mask_ignore=True),
+         with_keypoint=True),
     dict(type='PhotoMetricDistortion',
          brightness_delta=32,
          contrast_range=(0.5, 1.5),
          saturation_range=(0.5, 1.5),
          hue_delta=18),
     dict(type='RandomLighting', scale=0.1),
-    dict(type='AffineTransform',
-         img_scale=(512, 512),
-         ratio_mode='range',
-         flip_ratio=0.5,
-         flip_direction='horizontal',
-         shift_pixels=50,
-         scale_ratio=0.8,
-         scale_range=(0.7, 1.3),
-         min_occupation_ratio=0.6,
-         rotate_angle=1,
-         img_pad_value=(124, 127, 127),
-         mask_pad_value=dict(mask=(0,), mask_ignore=(0, 255)),
-         with_mask2bbox=True),
-    # dict(type='Resize', img_scale=(512, 512), keep_ratio=False),
-    # dict(type='RandomFlip', flip_ratio=0.5),
-    # dict(type='Pad', size_divisor=32),
+    dict(type='RandomCenterCropPad',
+         crop_size=(512, 512),
+         ratios=(0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3),
+         test_mode=False,
+         test_pad_mode=None,
+         with_mask2bbox=True,
+         **img_norm_cfg),
+    dict(type='Resize', img_scale=(512, 512), keep_ratio=False),
+    dict(type='RandomFlip', flip_ratio=0.5),
+    dict(type='Pad', size_divisor=32),
     dict(type='Normalize', **img_norm_cfg),
     dict(type='DefaultFormatBundle'),
-    dict(type='Collect',
-         keys=['img', 'gt_bboxes', 'gt_labels',
-               'gt_masks', 'gt_masks_ignore', 'gt_keypoints'])
+    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels', 'gt_masks', 'gt_keypoints'])
 ]
 test_pipeline = [
     dict(type='LoadImageFromFile', to_float32=True),
@@ -144,7 +133,7 @@ lr_config = dict(
     warmup_iters=500,
     warmup_ratio=1.0 / 5,
     step=[270, 300])
-checkpoint_config = dict(interval=1)
+checkpoint_config = dict(interval=10)
 evaluation = dict(interval=1, metric=['bbox', 'keypoints'], multitask=True)
 # runtime settings
 total_epochs = 320

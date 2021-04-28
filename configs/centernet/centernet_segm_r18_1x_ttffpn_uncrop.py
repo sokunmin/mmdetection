@@ -34,8 +34,6 @@ model = dict(
         num_classes=1,
         in_channels=64,
         feat_channels=64,
-        num_feat_levels=1,
-        corner_emb_channels=0,
         loss_heatmap=dict(
             type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1.0),
         loss_offset=dict(type='L1Loss', loss_weight=1.0),
@@ -45,7 +43,6 @@ model = dict(
         num_classes=1,
         in_channels=64,
         feat_channels=64,
-        num_feat_levels=1,
         saliency_channels=1,
         shape_channels=576,  # 576: 24x24, 1024: 32x32
         crop_upsample_cfg=None,

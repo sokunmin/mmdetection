@@ -32,8 +32,6 @@ model = dict(
         num_classes=80,
         in_channels=200,
         feat_channels=(320, 128),
-        num_feat_levels=1,
-        corner_emb_channels=0,
         loss_heatmap=dict(
             type='GaussianFocalLoss', alpha=2.0, gamma=4.0, loss_weight=1.0),
         loss_offset=None,
